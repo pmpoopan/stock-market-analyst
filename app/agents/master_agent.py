@@ -1,0 +1,77 @@
+"""Master Analyst agent.
+
+Synthesizes fundamental, technical, and sentiment outputs.
+Does NOT blindly average scores — explains agreement and conflicts.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+
+from app.agents.llm_client import LLMClient
+from app.analysis.master_synthesis import build_master_analysis_fallback, build_master_llm_payload
+from app.models.schemas import (
+    FundamentalAnalysisResult,
+    MasterAnalysisResult,
+    MasterInterpretation,
+    SentimentAnalysisResult,
+    TechnicalAnalysisResult,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class MasterAnalyst:
+    """Compare three analyst perspectives and produce coherent narrative."""
+
+    SYSTEM_PROMPT = (
+        "You are a senior equity research analyst synthesizing multiple perspectives "
+        "for Indian equities. Compare fundamental, technical, and sentiment analyses. "
+        "Identify agreement and disagreement between perspectives. "
+        "Highlight major risks and important catalysts. "
+        "Never invent missing data, metrics, or news. "
+        "Clearly distinguish reported data from your interpretation. "
+        "Do not blindly average scores — explain conflicts explicitly, e.g. "
+        "'Fundamentals are strong, but technical momentum has weakened.'"
+    )
+
+    def __init__(self, llm: LLMClient) -> None:
+        self._llm = llm
+
+    async def synthesize(
+        self,
+        symbol: str,
+        fundamental: FundamentalAnalysisResult,
+        technical: TechnicalAnalysisResult,
+        sentiment: SentimentAnalysisResult,
+    ) -> MasterAnalysisResult:
+        payload = build_master_llm_payload(symbol, fundamental, technical, sentiment)
+
+        prompt = (
+            "Synthesize the following analyst outputs for an Indian equity. "
+            "Explain agreement, disagreement, risks, and catalysts. "
+            "Use only the data provided.\n\n"
+            + json.dumps(payload, indent=2, default=str)
+        )
+
+        try:
+            interpretation = await self._llm.generate(
+                prompt=prompt,
+                system=self.SYSTEM_PROMPT,
+                structured_output=MasterInterpretation,
+            )
+            if isinstance(interpretation, MasterInterpretation):
+                return MasterAnalysisResult(
+                    stock=symbol,
+                    agreement_points=interpretation.agreement_points,
+                    disagreement_points=interpretation.disagreement_points,
+                    major_risks=interpretation.major_risks,
+                    important_catalysts=interpretation.important_catalysts,
+                    narrative=interpretation.narrative,
+                    data_vs_interpretation=interpretation.data_vs_interpretation,
+                )
+        except Exception as exc:
+            logger.warning("Master analyst LLM synthesis failed for %s: %s", symbol, exc)
+
+        return build_master_analysis_fallback(symbol, fundamental, technical, sentiment)
