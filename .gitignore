@@ -7,8 +7,8 @@ venv/
 .env
 .pytest_cache/
 
-# Data & cache
-data/
+# Data & cache (root runtime directory only — not app/data/ source package)
+/data/
 *.db
 logs/
 
