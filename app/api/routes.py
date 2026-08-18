@@ -8,6 +8,7 @@ import time
 from fastapi import APIRouter, HTTPException
 
 from app import __version__
+from app.api.error_messages import select_primary_error
 from app.api.schemas import (
     AnalyzeRequest,
     CompareRequest,
@@ -58,7 +59,7 @@ async def analyze_stock(request: AnalyzeRequest) -> StockAnalysisResponse:
         return response
 
     errors = state.get("errors", [])
-    detail = errors[0].message if errors else "Stock analysis failed"
+    detail = select_primary_error(errors) or "Stock analysis failed"
     logger.warning("Analyze failed after %.1fms: %s", duration_ms, detail)
     raise HTTPException(status_code=400, detail=detail)
 
@@ -85,7 +86,7 @@ async def compare_stocks(request: CompareRequest) -> StockComparisonResult:
         return result
 
     errors = state.get("errors", [])
-    detail = errors[0].message if errors else "Stock comparison failed"
+    detail = select_primary_error(errors) or "Stock comparison failed"
     logger.warning("Compare failed after %.1fms: %s", duration_ms, detail)
     raise HTTPException(status_code=400, detail=detail)
 
@@ -120,6 +121,6 @@ async def analyze_portfolio(request: PortfolioRequest) -> PortfolioAnalysisResul
         return result
 
     errors = state.get("errors", [])
-    detail = errors[0].message if errors else "Portfolio analysis failed"
+    detail = select_primary_error(errors) or "Portfolio analysis failed"
     logger.warning("Portfolio failed after %.1fms: %s", duration_ms, detail)
     raise HTTPException(status_code=400, detail=detail)

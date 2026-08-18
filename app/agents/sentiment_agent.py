@@ -17,6 +17,7 @@ from pydantic import HttpUrl
 
 from app.analysis.sentiment_analysis import SentimentAnalysisEngine, WORD_PATTERN
 from app.agents.llm_client import LLMClient
+from app.config.settings import get_settings
 from app.data.interfaces import NewsSearchProvider
 from app.models.schemas import NewsArticle, SentimentAnalysisResult, SentimentInterpretation
 
@@ -50,7 +51,6 @@ class SentimentAnalyst:
         return [
             f"{base_name} stock India news",
             f"{base_name} earnings results India",
-            f"{base_name} management regulatory India",
         ]
 
     def _deduplicate_articles(self, articles: list[NewsArticle]) -> list[NewsArticle]:
@@ -186,6 +186,7 @@ class SentimentAnalyst:
                 prompt=prompt,
                 system=self.SYSTEM_PROMPT,
                 structured_output=SentimentInterpretation,
+                max_tokens=get_settings().llm_max_tokens_sentiment,
             )
             if isinstance(interpretation, SentimentInterpretation):
                 return (

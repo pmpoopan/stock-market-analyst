@@ -65,15 +65,16 @@ def test_get_quote_uses_cache_on_second_call(mock_ticker_cls, provider: YahooFin
     mock_ticker_cls.assert_called_once()
 
 
-@patch("app.data.yahoo_finance.yf.Ticker")
 def test_get_quote_without_cache(test_settings, tmp_cache_path):
     uncached = YahooFinanceProvider(cache=None, settings=test_settings)
     with patch("app.data.yahoo_finance.yf.Ticker") as mock_ticker_cls:
-        mock_ticker_cls.return_value = _mock_ticker()
+        mock_ticker = _mock_ticker()
+        mock_ticker_cls.return_value = mock_ticker
         quote1 = uncached.get_quote(MOCK_SYMBOL)
         quote2 = uncached.get_quote(MOCK_SYMBOL)
     assert quote1.price == quote2.price
-    assert mock_ticker_cls.call_count == 2
+    assert mock_ticker_cls.call_count == 1
+    assert mock_ticker.info is not None
 
 
 @patch("app.data.yahoo_finance.yf.Ticker")

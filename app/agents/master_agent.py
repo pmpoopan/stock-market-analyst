@@ -11,6 +11,7 @@ import logging
 
 from app.agents.llm_client import LLMClient
 from app.analysis.master_synthesis import build_master_analysis_fallback, build_master_llm_payload
+from app.config.settings import get_settings
 from app.models.schemas import (
     FundamentalAnalysisResult,
     MasterAnalysisResult,
@@ -60,6 +61,7 @@ class MasterAnalyst:
                 prompt=prompt,
                 system=self.SYSTEM_PROMPT,
                 structured_output=MasterInterpretation,
+                max_tokens=get_settings().llm_max_tokens_master,
             )
             if isinstance(interpretation, MasterInterpretation):
                 return MasterAnalysisResult(

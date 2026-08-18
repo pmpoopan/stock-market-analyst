@@ -15,6 +15,7 @@ import logging
 from app.agents.llm_client import LLMClient
 from app.analysis.technical_analysis import MIN_BARS_RECOMMENDED, TechnicalAnalysisEngine
 from app.analysis.technical_indicators import TechnicalIndicatorEngine
+from app.config.settings import get_settings
 from app.data.exceptions import DataNotFoundError
 from app.data.interfaces import MarketDataProvider
 from app.models.schemas import TechnicalAnalysisResult, TechnicalInterpretation
@@ -122,6 +123,7 @@ class TechnicalAnalyst:
                 prompt=prompt,
                 system=self.SYSTEM_PROMPT,
                 structured_output=TechnicalInterpretation,
+                max_tokens=get_settings().llm_max_tokens_technical,
             )
             if isinstance(interpretation, TechnicalInterpretation):
                 return interpretation.momentum, interpretation.volatility, interpretation.summary

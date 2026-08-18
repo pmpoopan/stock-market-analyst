@@ -6,6 +6,7 @@ Wraps yfinance; exposes MarketDataProvider interface only.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +16,7 @@ from app.config.settings import Settings, get_settings
 from app.data.exceptions import DataNotFoundError, DataProviderError
 from app.data.interfaces import BaseDataProvider, CacheProvider
 from app.models.schemas import FinancialMetrics, HistoricalData, OHLCVBar, Quote
+from app.util.retry import is_rate_limit_error, sync_retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,8 @@ class YahooFinanceProvider(BaseDataProvider):
     ) -> None:
         self._cache = cache
         self._settings = settings or get_settings()
+        self._ticker_lock = threading.Lock()
+        self._tickers: dict[str, yf.Ticker] = {}
 
     @property
     def _ttl_quotes(self) -> int:
@@ -48,6 +52,25 @@ class YahooFinanceProvider(BaseDataProvider):
 
     def _normalize_symbol(self, symbol: str) -> str:
         return symbol.strip().upper()
+
+    def _get_ticker(self, symbol: str) -> yf.Ticker:
+        normalized = self._normalize_symbol(symbol)
+        with self._ticker_lock:
+            ticker = self._tickers.get(normalized)
+            if ticker is None:
+                ticker = yf.Ticker(normalized)
+                self._tickers[normalized] = ticker
+            return ticker
+
+    def _with_retry(self, operation_name: str, operation):
+        return sync_retry_with_backoff(
+            operation,
+            max_attempts=self._settings.yahoo_retry_max_attempts,
+            base_delay=self._settings.yahoo_retry_base_delay_seconds,
+            max_delay=self._settings.yahoo_retry_max_delay_seconds,
+            operation_name=operation_name,
+            retry_on=is_rate_limit_error,
+        )
 
     def _cache_get(self, namespace: str, key: str, model: type[Quote | HistoricalData | FinancialMetrics]):
         if self._cache is None:
@@ -78,38 +101,55 @@ class YahooFinanceProvider(BaseDataProvider):
             return cached
 
         logger.debug("Fetching quote from Yahoo Finance: %s", normalized)
+
+        def _fetch_quote() -> Quote:
+            try:
+                ticker = self._get_ticker(normalized)
+                info = ticker.info or {}
+            except Exception as exc:
+                if is_rate_limit_error(exc):
+                    raise
+                raise DataProviderError(
+                    f"Failed to fetch quote for {normalized}: {exc}"
+                ) from exc
+
+            price = (
+                info.get("currentPrice")
+                or info.get("regularMarketPrice")
+                or info.get("previousClose")
+            )
+            if price is None:
+                raise DataNotFoundError(f"No price data available for {normalized}")
+
+            previous_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
+            change = None
+            change_percent = None
+            if previous_close is not None:
+                change = round(price - previous_close, 4)
+                if previous_close != 0:
+                    change_percent = round((change / previous_close) * 100, 4)
+
+            return Quote(
+                symbol=normalized,
+                name=info.get("shortName") or info.get("longName"),
+                price=float(price),
+                currency=info.get("currency", "INR"),
+                change=change,
+                change_percent=change_percent,
+                market_cap=info.get("marketCap"),
+                timestamp=datetime.now(timezone.utc),
+            )
+
         try:
-            ticker = yf.Ticker(normalized)
-            info = ticker.info or {}
+            quote = self._with_retry(f"Yahoo quote {normalized}", _fetch_quote)
+        except DataNotFoundError:
+            raise
         except Exception as exc:
-            raise DataProviderError(f"Failed to fetch quote for {normalized}: {exc}") from exc
-
-        price = (
-            info.get("currentPrice")
-            or info.get("regularMarketPrice")
-            or info.get("previousClose")
-        )
-        if price is None:
-            raise DataNotFoundError(f"No price data available for {normalized}")
-
-        previous_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
-        change = None
-        change_percent = None
-        if previous_close is not None:
-            change = round(price - previous_close, 4)
-            if previous_close != 0:
-                change_percent = round((change / previous_close) * 100, 4)
-
-        quote = Quote(
-            symbol=normalized,
-            name=info.get("shortName") or info.get("longName"),
-            price=float(price),
-            currency=info.get("currency", "INR"),
-            change=change,
-            change_percent=change_percent,
-            market_cap=info.get("marketCap"),
-            timestamp=datetime.now(timezone.utc),
-        )
+            if is_rate_limit_error(exc):
+                logger.error("Yahoo Finance rate limit fetching quote for %s: %s", normalized, exc)
+            raise DataProviderError(
+                f"Failed to fetch quote for {normalized}: {exc}"
+            ) from exc
 
         self._cache_set(CACHE_NS_QUOTES, cache_key, quote, self._ttl_quotes)
         return quote
@@ -124,34 +164,57 @@ class YahooFinanceProvider(BaseDataProvider):
             return cached
 
         logger.debug("Fetching historical data from Yahoo Finance: %s period=%s", normalized, period)
+
+        def _fetch_historical() -> HistoricalData:
+            try:
+                ticker = self._get_ticker(normalized)
+                df = ticker.history(period=period, auto_adjust=True)
+            except Exception as exc:
+                if is_rate_limit_error(exc):
+                    raise
+                raise DataProviderError(
+                    f"Failed to fetch historical data for {normalized}: {exc}"
+                ) from exc
+
+            if df is None or df.empty:
+                raise DataNotFoundError(
+                    f"No historical data available for {normalized} (period={period})"
+                )
+
+            bars: list[OHLCVBar] = []
+            for ts, row in df.iterrows():
+                bar_date = ts.date() if hasattr(ts, "date") else ts
+                bars.append(
+                    OHLCVBar(
+                        date=bar_date,
+                        open=round(float(row["Open"]), 4),
+                        high=round(float(row["High"]), 4),
+                        low=round(float(row["Low"]), 4),
+                        close=round(float(row["Close"]), 4),
+                        volume=int(row["Volume"]),
+                    )
+                )
+
+            return HistoricalData(symbol=normalized, period=period, bars=bars)
+
         try:
-            ticker = yf.Ticker(normalized)
-            df = ticker.history(period=period, auto_adjust=True)
+            historical = self._with_retry(
+                f"Yahoo historical {normalized}",
+                _fetch_historical,
+            )
+        except DataNotFoundError:
+            raise
         except Exception as exc:
+            if is_rate_limit_error(exc):
+                logger.error(
+                    "Yahoo Finance rate limit fetching historical data for %s: %s",
+                    normalized,
+                    exc,
+                )
             raise DataProviderError(
                 f"Failed to fetch historical data for {normalized}: {exc}"
             ) from exc
 
-        if df is None or df.empty:
-            raise DataNotFoundError(
-                f"No historical data available for {normalized} (period={period})"
-            )
-
-        bars: list[OHLCVBar] = []
-        for ts, row in df.iterrows():
-            bar_date = ts.date() if hasattr(ts, "date") else ts
-            bars.append(
-                OHLCVBar(
-                    date=bar_date,
-                    open=round(float(row["Open"]), 4),
-                    high=round(float(row["High"]), 4),
-                    low=round(float(row["Low"]), 4),
-                    close=round(float(row["Close"]), 4),
-                    volume=int(row["Volume"]),
-                )
-            )
-
-        historical = HistoricalData(symbol=normalized, period=period, bars=bars)
         self._cache_set(CACHE_NS_HISTORICAL, cache_key, historical, self._ttl_historical)
         return historical
 
@@ -167,31 +230,59 @@ class YahooFinanceProvider(BaseDataProvider):
             return cached
 
         logger.debug("Fetching financials from Yahoo Finance: %s", normalized)
+
+        def _fetch_financials() -> FinancialMetrics:
+            try:
+                ticker = self._get_ticker(normalized)
+                info = ticker.info or {}
+                income_stmt = self._safe_statement(ticker, ["financials", "income_stmt"])
+                balance_sheet = self._safe_statement(ticker, ["balance_sheet"])
+                cashflow = self._safe_statement(ticker, ["cashflow", "cash_flow"])
+            except Exception as exc:
+                if is_rate_limit_error(exc):
+                    raise
+                raise DataProviderError(
+                    f"Failed to fetch financials for {normalized}: {exc}"
+                ) from exc
+
+            if not info and income_stmt is None and balance_sheet is None:
+                raise DataNotFoundError(f"No financial data available for {normalized}")
+
+            raw_data = {
+                "symbol": normalized,
+                "info": info,
+                "income_stmt": income_stmt,
+                "balance_sheet": balance_sheet,
+                "cashflow": cashflow,
+                "data_sources": self._collect_data_sources(
+                    info, income_stmt, balance_sheet, cashflow
+                ),
+            }
+
+            metrics = FundamentalMetricsCalculator.compute(raw_data)
+
+            if self._metrics_are_empty(metrics):
+                raise DataNotFoundError(f"Insufficient fundamental metrics for {normalized}")
+
+            return metrics
+
         try:
-            ticker = yf.Ticker(normalized)
-            info = ticker.info or {}
-            income_stmt = self._safe_statement(ticker, ["financials", "income_stmt"])
-            balance_sheet = self._safe_statement(ticker, ["balance_sheet"])
-            cashflow = self._safe_statement(ticker, ["cashflow", "cash_flow"])
+            metrics = self._with_retry(
+                f"Yahoo financials {normalized}",
+                _fetch_financials,
+            )
+        except DataNotFoundError:
+            raise
         except Exception as exc:
-            raise DataProviderError(f"Failed to fetch financials for {normalized}: {exc}") from exc
-
-        if not info and income_stmt is None and balance_sheet is None:
-            raise DataNotFoundError(f"No financial data available for {normalized}")
-
-        raw_data = {
-            "symbol": normalized,
-            "info": info,
-            "income_stmt": income_stmt,
-            "balance_sheet": balance_sheet,
-            "cashflow": cashflow,
-            "data_sources": self._collect_data_sources(info, income_stmt, balance_sheet, cashflow),
-        }
-
-        metrics = FundamentalMetricsCalculator.compute(raw_data)
-
-        if self._metrics_are_empty(metrics):
-            raise DataNotFoundError(f"Insufficient fundamental metrics for {normalized}")
+            if is_rate_limit_error(exc):
+                logger.error(
+                    "Yahoo Finance rate limit fetching financials for %s: %s",
+                    normalized,
+                    exc,
+                )
+            raise DataProviderError(
+                f"Failed to fetch financials for {normalized}: {exc}"
+            ) from exc
 
         self._cache_set(CACHE_NS_FINANCIALS, cache_key, metrics, self._ttl_financials)
         return metrics

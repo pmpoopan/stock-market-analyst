@@ -33,12 +33,29 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
     llm_temperature: float = 0.2
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 1024
+    llm_max_tokens_fundamental: int = 640
+    llm_max_tokens_technical: int = 512
+    llm_max_tokens_sentiment: int = 640
+    llm_max_tokens_master: int = 768
+    llm_max_tokens_comparison: int = 1024
+    llm_max_tokens_portfolio: int = 768
+    llm_max_concurrent_requests: int = 2
+    llm_retry_max_attempts: int = 3
+    llm_retry_base_delay_seconds: float = 1.0
+    llm_retry_max_delay_seconds: float = 30.0
 
     # Data providers
     yahoo_finance_timeout: int = 30
+    yahoo_retry_max_attempts: int = 3
+    yahoo_retry_base_delay_seconds: float = 0.5
+    yahoo_retry_max_delay_seconds: float = 8.0
     web_search_provider: Literal["duckduckgo"] = "duckduckgo"
     web_search_max_results: int = 10
+    web_search_retry_max_attempts: int = 2
+    web_search_retry_base_delay_seconds: float = 1.0
+    web_search_retry_max_delay_seconds: float = 15.0
+    web_search_rate_limit_cache_seconds: int = 120
 
     # Cache (SQLite MVP)
     cache_enabled: bool = True

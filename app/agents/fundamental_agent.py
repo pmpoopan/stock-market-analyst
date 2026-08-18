@@ -14,6 +14,7 @@ import logging
 
 from app.agents.llm_client import LLMClient
 from app.analysis.fundamental_analysis import FundamentalAnalysisEngine
+from app.config.settings import get_settings
 from app.data.interfaces import MarketDataProvider
 from app.models.schemas import FundamentalAnalysisResult, FundamentalInterpretation
 
@@ -86,6 +87,7 @@ class FundamentalAnalyst:
                 prompt=prompt,
                 system=self.SYSTEM_PROMPT,
                 structured_output=FundamentalInterpretation,
+                max_tokens=get_settings().llm_max_tokens_fundamental,
             )
             if isinstance(interpretation, FundamentalInterpretation):
                 return (

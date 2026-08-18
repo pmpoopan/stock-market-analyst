@@ -16,6 +16,7 @@ from app.agents.sentiment_agent import SentimentAnalyst
 from app.agents.technical_agent import TechnicalAnalyst
 from app.analysis.portfolio_metrics import PortfolioMetricsCalculator
 from app.analysis.scoring import ScoringEngine
+from app.config.settings import get_settings
 from app.data.interfaces import MarketDataProvider
 from app.models.schemas import (
     DecisionResult,
@@ -190,6 +191,7 @@ class PortfolioAnalyst:
                 prompt=prompt,
                 system=self.SYSTEM_PROMPT,
                 structured_output=PortfolioInterpretation,
+                max_tokens=get_settings().llm_max_tokens_portfolio,
             )
             if isinstance(interpretation, PortfolioInterpretation):
                 return interpretation.portfolio_risk, interpretation.summary

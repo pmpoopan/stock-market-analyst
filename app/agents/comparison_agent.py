@@ -7,6 +7,7 @@ import logging
 
 from app.agents.llm_client import LLMClient
 from app.analysis.comparison_metrics import ComparisonMetricsCalculator
+from app.config.settings import get_settings
 from app.models.schemas import (
     ComparisonInterpretation,
     DecisionResult,
@@ -53,6 +54,13 @@ class ComparisonAnalyst:
         ]
 
         if len(available) < 2:
+            missing = [symbol for symbol in symbols if symbol not in available]
+            logger.warning(
+                "Comparison requires at least 2 complete stocks; requested=%s available=%s missing=%s",
+                symbols,
+                available,
+                missing,
+            )
             raise ValueError(
                 "At least two stocks with complete analysis are required for comparison"
             )
@@ -135,6 +143,7 @@ class ComparisonAnalyst:
                 prompt=prompt,
                 system=self.SYSTEM_PROMPT,
                 structured_output=ComparisonInterpretation,
+                max_tokens=get_settings().llm_max_tokens_comparison,
             )
             if isinstance(interpretation, ComparisonInterpretation):
                 return {

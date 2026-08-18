@@ -15,10 +15,12 @@ from app.config.settings import Settings, get_settings
 from app.data.exceptions import DataProviderError
 from app.data.interfaces import CacheProvider
 from app.models.schemas import NewsArticle
+from app.util.retry import is_rate_limit_error, sync_retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
 CACHE_NS_SEARCH = "search"
+CACHE_NS_SEARCH_RATELIMIT = "search_ratelimit"
 DEFAULT_REGION = "in-en"
 
 
@@ -48,6 +50,13 @@ class DuckDuckGoSearchProvider:
         cache_key = f"{normalized_query}:{limit}"
 
         if self._cache is not None:
+            if self._cache.get(CACHE_NS_SEARCH_RATELIMIT, cache_key) is not None:
+                logger.warning(
+                    "Skipping DuckDuckGo search due to recent rate limit: %s",
+                    cache_key,
+                )
+                return []
+
             cached = self._cache.get(CACHE_NS_SEARCH, cache_key)
             if cached is not None:
                 logger.debug("Cache hit for news search: %s", cache_key)
@@ -55,9 +64,26 @@ class DuckDuckGoSearchProvider:
 
         logger.debug("Searching DuckDuckGo news: %s (limit=%d)", normalized_query, limit)
         try:
-            articles = self._fetch_news(normalized_query, limit)
+            articles = sync_retry_with_backoff(
+                lambda: self._fetch_news(normalized_query, limit),
+                max_attempts=self._settings.web_search_retry_max_attempts,
+                base_delay=self._settings.web_search_retry_base_delay_seconds,
+                max_delay=self._settings.web_search_retry_max_delay_seconds,
+                operation_name=f"DuckDuckGo news '{normalized_query}'",
+                retry_on=is_rate_limit_error,
+            )
         except Exception as exc:
-            raise DataProviderError(f"News search failed for '{normalized_query}': {exc}") from exc
+            if is_rate_limit_error(exc):
+                logger.error(
+                    "DuckDuckGo rate limit for '%s' after retries: %s",
+                    normalized_query,
+                    exc,
+                )
+                self._cache_rate_limited(cache_key)
+                return []
+            raise DataProviderError(
+                f"News search failed for '{normalized_query}': {exc}"
+            ) from exc
 
         if self._cache is not None:
             self._cache.set(
@@ -68,6 +94,16 @@ class DuckDuckGoSearchProvider:
             )
 
         return articles
+
+    def _cache_rate_limited(self, cache_key: str) -> None:
+        if self._cache is None:
+            return
+        self._cache.set(
+            CACHE_NS_SEARCH_RATELIMIT,
+            cache_key,
+            "1",
+            ttl_seconds=self._settings.web_search_rate_limit_cache_seconds,
+        )
 
     def _fetch_news(self, query: str, limit: int) -> list[NewsArticle]:
         articles: list[NewsArticle] = []

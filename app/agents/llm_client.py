@@ -5,6 +5,7 @@ Agents use this for interpretation/reasoning — not for numeric calculations.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -12,9 +13,15 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.agents.llm_exceptions import LLMRateLimitError
 from app.config.settings import Settings, get_settings
+from app.util.retry import async_retry_with_backoff, is_rate_limit_error
 
 logger = logging.getLogger(__name__)
+
+USER_FACING_RATE_LIMIT_MESSAGE = (
+    "Analysis service is temporarily busy. Please try again in a minute."
+)
 
 
 class LLMClient(ABC):
@@ -26,6 +33,7 @@ class LLMClient(ABC):
         prompt: str,
         system: str | None = None,
         structured_output: type | None = None,
+        max_tokens: int | None = None,
     ) -> str | Any:
         """Generate a completion; optionally parse into a Pydantic model."""
         ...
@@ -48,9 +56,15 @@ class MockLLMClient(LLMClient):
         prompt: str,
         system: str | None = None,
         structured_output: type | None = None,
+        max_tokens: int | None = None,
     ) -> str | Any:
         self.calls.append(
-            {"prompt": prompt, "system": system, "structured_output": structured_output}
+            {
+                "prompt": prompt,
+                "system": system,
+                "structured_output": structured_output,
+                "max_tokens": max_tokens,
+            }
         )
 
         if structured_output is not None:
@@ -122,20 +136,35 @@ class GroqLLMClient(LLMClient):
         self._settings = settings or get_settings()
         if not self._settings.groq_api_key:
             raise ValueError("GROQ_API_KEY is required for Groq LLM client")
+        self._client = None
+        self._semaphore: asyncio.Semaphore | None = None
+
+    def _get_client(self):
+        if self._client is None:
+            from groq import AsyncGroq
+
+            self._client = AsyncGroq(api_key=self._settings.groq_api_key)
+        return self._client
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        if self._semaphore is None:
+            limit = max(1, self._settings.llm_max_concurrent_requests)
+            self._semaphore = asyncio.Semaphore(limit)
+        return self._semaphore
 
     async def generate(
         self,
         prompt: str,
         system: str | None = None,
         structured_output: type | None = None,
+        max_tokens: int | None = None,
     ) -> str | Any:
-        from groq import AsyncGroq
-
-        client = AsyncGroq(api_key=self._settings.groq_api_key)
-
         system_content = system or "You are a helpful financial analysis assistant."
         if structured_output is not None:
-            schema_hint = json.dumps(structured_output.model_json_schema())
+            schema_hint = json.dumps(
+                structured_output.model_json_schema(),
+                separators=(",", ":"),
+            )
             system_content += (
                 "\nRespond with valid JSON only, matching this schema:\n" + schema_hint
             )
@@ -145,17 +174,40 @@ class GroqLLMClient(LLMClient):
             {"role": "user", "content": prompt},
         ]
 
+        completion_tokens = max_tokens or self._settings.llm_max_tokens
         kwargs: dict[str, Any] = {
             "model": self._settings.groq_model,
             "messages": messages,
             "temperature": self._settings.llm_temperature,
-            "max_tokens": self._settings.llm_max_tokens,
+            "max_tokens": completion_tokens,
         }
         if structured_output is not None:
             kwargs["response_format"] = {"type": "json_object"}
 
-        response = await client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content or ""
+        async def _call_groq() -> str:
+            client = self._get_client()
+            async with self._get_semaphore():
+                response = await client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content or ""
+
+        try:
+            content = await async_retry_with_backoff(
+                _call_groq,
+                max_attempts=self._settings.llm_retry_max_attempts,
+                base_delay=self._settings.llm_retry_base_delay_seconds,
+                max_delay=self._settings.llm_retry_max_delay_seconds,
+                operation_name="Groq LLM",
+                retry_on=is_rate_limit_error,
+            )
+        except Exception as exc:
+            if is_rate_limit_error(exc):
+                logger.error(
+                    "Groq rate limit exceeded after %d attempts: %s",
+                    self._settings.llm_retry_max_attempts,
+                    exc,
+                )
+                raise LLMRateLimitError(USER_FACING_RATE_LIMIT_MESSAGE) from exc
+            raise
 
         if structured_output is not None:
             return structured_output.model_validate_json(content)
