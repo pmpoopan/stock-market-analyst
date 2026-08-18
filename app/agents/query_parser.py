@@ -8,7 +8,12 @@ from __future__ import annotations
 import re
 
 from app.agents.llm_client import LLMClient
-from app.agents.stock_aliases import COMPARE_KEYWORDS, INDIAN_STOCK_ALIASES, PORTFOLIO_KEYWORDS
+from app.agents.stock_aliases import (
+    COMPARE_KEYWORDS,
+    INDIAN_STOCK_ALIASES,
+    PORTFOLIO_KEYWORDS,
+    resolve_symbol,
+)
 from app.models.schemas import ParsedQuery, PortfolioHolding, QueryIntent
 
 SYMBOL_SUFFIX_PATTERN = re.compile(r"\b([A-Za-z&]{2,15})\.(NS|BO)\b", re.IGNORECASE)
@@ -93,7 +98,4 @@ class QueryParser:
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
-        symbol = symbol.strip().upper()
-        if "." not in symbol:
-            return f"{symbol}.NS"
-        return symbol
+        return resolve_symbol(symbol)

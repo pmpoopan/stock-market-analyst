@@ -3,6 +3,7 @@
 from app.analysis.portfolio_metrics import PortfolioMetricsCalculator
 from app.models.schemas import (
     DecisionResult,
+    HoldingAnalysis,
     PortfolioHolding,
     Quote,
     Rating,
@@ -82,3 +83,43 @@ def test_analyze_portfolio_aggregates_totals():
     assert result.strongest_holdings == [MOCK_SYMBOL]
     assert result.weakest_holdings == [MOCK_SYMBOL]
     assert "Portfolio of 1 holdings" in result.summary
+
+
+def test_strongest_weakest_mutually_exclusive():
+    def _holding(symbol: str, score: float) -> HoldingAnalysis:
+        holding = PortfolioHolding(symbol=symbol, quantity=10, buy_price=1000)
+        quote = Quote(symbol=symbol, price=1100.0, currency="INR")
+        return PortfolioMetricsCalculator.analyze_holding(
+            holding, quote, _decision(score)
+        )
+
+    holdings = [
+        _holding("RELIANCE.NS", 78),
+        _holding("INFY.NS", 64),
+        _holding("TCS.NS", 51),
+        _holding("HDFCBANK.NS", 43),
+    ]
+    strongest, weakest = PortfolioMetricsCalculator.strongest_weakest(holdings, count=2)
+
+    assert strongest == ["RELIANCE.NS", "INFY.NS"]
+    assert weakest == ["HDFCBANK.NS", "TCS.NS"]
+    assert not set(strongest) & set(weakest)
+
+
+def test_strongest_weakest_tie_breaks_by_symbol():
+    holdings = [
+        PortfolioMetricsCalculator.analyze_holding(
+            PortfolioHolding(symbol="INFY.NS", quantity=10, buy_price=1000),
+            Quote(symbol="INFY.NS", price=1100.0, currency="INR"),
+            _decision(70),
+        ),
+        PortfolioMetricsCalculator.analyze_holding(
+            PortfolioHolding(symbol="RELIANCE.NS", quantity=10, buy_price=1000),
+            Quote(symbol="RELIANCE.NS", price=1100.0, currency="INR"),
+            _decision(70),
+        ),
+    ]
+    strongest, weakest = PortfolioMetricsCalculator.strongest_weakest(holdings, count=1)
+
+    assert strongest == ["RELIANCE.NS"]
+    assert weakest == ["INFY.NS"]

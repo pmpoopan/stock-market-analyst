@@ -15,7 +15,13 @@ from app.api.schemas import (
     PortfolioRequest,
 )
 from app.config.settings import get_settings
-from app.models.schemas import PortfolioAnalysisResult, StockAnalysisResponse, StockComparisonResult
+from app.agents.stock_aliases import resolve_symbol
+from app.models.schemas import (
+    PortfolioAnalysisResult,
+    PortfolioHolding,
+    StockAnalysisResponse,
+    StockComparisonResult,
+)
 from app.services.container import get_container
 
 logger = logging.getLogger(__name__)
@@ -60,7 +66,7 @@ async def analyze_stock(request: AnalyzeRequest) -> StockAnalysisResponse:
 @router.post("/compare", response_model=StockComparisonResult)
 async def compare_stocks(request: CompareRequest) -> StockComparisonResult:
     """Compare two or more stocks side by side."""
-    stocks = [symbol.strip().upper() for symbol in request.stocks]
+    stocks = [resolve_symbol(symbol) for symbol in request.stocks]
     logger.info("Compare request: stocks=%s", stocks)
     start = time.perf_counter()
 
@@ -87,12 +93,20 @@ async def compare_stocks(request: CompareRequest) -> StockComparisonResult:
 @router.post("/portfolio", response_model=PortfolioAnalysisResult)
 async def analyze_portfolio(request: PortfolioRequest) -> PortfolioAnalysisResult:
     """Analyze a portfolio of holdings."""
-    symbols = [holding.symbol.upper() for holding in request.holdings]
+    resolved_holdings = [
+        PortfolioHolding(
+            symbol=resolve_symbol(holding.symbol),
+            quantity=holding.quantity,
+            buy_price=holding.buy_price,
+        )
+        for holding in request.holdings
+    ]
+    symbols = [holding.symbol for holding in resolved_holdings]
     logger.info("Portfolio request: holdings=%s", symbols)
     start = time.perf_counter()
 
     container = get_container()
-    state = await container.orchestrator.portfolio(request.holdings)
+    state = await container.orchestrator.portfolio(resolved_holdings)
     duration_ms = (time.perf_counter() - start) * 1000
 
     result = state.get("portfolio_analysis")

@@ -1,188 +1,270 @@
-"""Buddy — Streamlit frontend.
-
-Calls FastAPI backend; structured layouts for analyze, compare, and portfolio modes.
-"""
+"""Buddy — Stock Market Analyst Streamlit frontend."""
 
 from __future__ import annotations
 
-import os
+import logging
+import sys
+from pathlib import Path
+
+# Streamlit runs with CWD on frontend/ — ensure project root is importable.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
 import requests
 import streamlit as st
 
 from ui_helpers import (
-    comparison_score_rows,
+    action_button_label_spacer,
+    ai_conclusion_cards_html,
+    analyze_conclusion_card_html,
+    build_compare_stock_list,
+    comparison_detailed_analysis_html,
+    comparison_scorecard_html,
+    comparison_stock_cards_html,
+    comparison_wins_html,
+    crisp_analyst_card_html,
+    display_name,
     format_inr,
+    format_large_number,
     format_percent,
+    format_ratio,
     format_score,
+    format_stock_name,
+    fundamental_view_bullets,
+    global_css,
+    holdings_table_html,
+    is_local_development,
+    metric_summary_table_html,
     normalize_holdings,
     portfolio_holdings_rows,
-    rating_label,
+    portfolio_summary_cards_html,
+    rating_tone,
+    resolve_api_base_url,
+    sanitize_display_text,
     score_delta_color,
+    section_panel_html,
+    sentiment_tone,
+    sentiment_view_bullets,
+    single_stock_summary_html,
+    technical_view_bullets,
+    user_friendly_error,
 )
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api")
-DEFAULT_API_BASE_URL = API_BASE_URL.rstrip("/")
+logger = logging.getLogger(__name__)
+
+NAV_ITEMS = [
+    ("analyze", "Analyze Stock", "👤"),
+    ("compare", "Compare Stocks", "📊"),
+    ("portfolio", "My Portfolio", "💼"),
+]
 
 
-def _get_api_base_url() -> str:
-    """Return API base URL from session state (sidebar can override env default)."""
-    url = st.session_state.get("api_base_url", DEFAULT_API_BASE_URL)
-    return str(url).rstrip("/")
-
-
-def _api_post(endpoint: str, payload: dict) -> dict | None:
-    """POST to FastAPI and return JSON response."""
-    base_url = _get_api_base_url()
+def _secrets_dict() -> dict | None:
     try:
-        response = requests.post(f"{base_url}{endpoint}", json=payload, timeout=120)
-        if response.status_code >= 400:
-            try:
-                detail = response.json().get("detail", response.text)
-            except ValueError:
-                detail = response.text
-            st.error(f"Request failed: {detail}")
-            return None
-        return response.json()
-    except requests.RequestException as exc:
-        st.error(f"API error: {exc}")
+        return dict(st.secrets)
+    except Exception:
         return None
 
 
-def _check_api_health() -> bool:
-    """Show API connectivity in the sidebar. Returns True when health check succeeds."""
+def _get_api_base_url() -> str:
+    return resolve_api_base_url(_secrets_dict())
+
+
+def _api_post(endpoint: str, payload: dict) -> tuple[dict | None, str | None]:
     base_url = _get_api_base_url()
-    health_url = f"{base_url}/health"
     try:
-        response = requests.get(health_url, timeout=5)
-        if response.ok:
-            data = response.json()
-            st.sidebar.success(f"API online — {data.get('app', 'Buddy')}")
-            return True
-        st.sidebar.error(f"API error ({response.status_code}) at {health_url}")
-    except requests.RequestException:
-        st.sidebar.error("Cannot reach API")
-        with st.sidebar.expander("Start the backend", expanded=True):
-            st.markdown(
-                "1. Open a terminal in the project folder\n"
-                "2. Run: `.venv\\Scripts\\activate` then `python main.py`\n"
-                "3. Verify: [health check](http://localhost:8000/api/health)\n\n"
-                f"Current URL: `{base_url}`\n\n"
-                "Note: `http://localhost:8000/api` has no page — use `/api/health` or `/docs`."
-            )
-    return False
+        response = requests.post(
+            f"{base_url}{endpoint}",
+            json=payload,
+            timeout=120,
+        )
+        if response.status_code >= 400:
+            detail = None
+            try:
+                body = response.json()
+                detail = body.get("detail", response.text)
+            except ValueError:
+                detail = response.text
+            logger.warning("API POST %s failed (%s): %s", endpoint, response.status_code, detail)
+            return None, user_friendly_error(response.status_code, str(detail))
+        return response.json(), None
+    except requests.Timeout:
+        logger.warning("API POST %s timed out", endpoint)
+        return None, user_friendly_error(is_timeout=True)
+    except requests.RequestException as exc:
+        logger.warning("API POST %s connection error: %s", endpoint, exc)
+        return None, user_friendly_error(is_connection=True)
 
 
-def _render_api_sidebar() -> None:
-    """Sidebar API settings and health probe."""
-    st.sidebar.header("Backend")
-    if "api_base_url" not in st.session_state:
-        st.session_state.api_base_url = DEFAULT_API_BASE_URL
+def _show_user_error(message: str) -> None:
+    st.warning(message)
 
-    st.sidebar.text_input(
-        "API base URL",
-        key="api_base_url",
-        help="Default: http://localhost:8000/api (set API_BASE_URL env to override on load)",
+
+def _inject_styles() -> None:
+    st.markdown(global_css(), unsafe_allow_html=True)
+
+
+def _render_hero() -> None:
+    st.markdown(
+        """
+<div class="buddy-hero">
+  <div class="buddy-hero-brand">BUDDY</div>
+  <div class="buddy-hero-title">Stock Market Analyst</div>
+  <div class="buddy-hero-sub">AI-powered analysis for Indian equities</div>
+  <div class="buddy-hero-tags">Fundamentals · Technicals · Sentiment · AI Synthesis</div>
+</div>
+""",
+        unsafe_allow_html=True,
     )
-    api_online = _check_api_health()
-    if api_online:
-        base = _get_api_base_url()
-        st.sidebar.caption(f"[OpenAPI docs]({base.replace('/api', '')}/docs)")
 
 
-def _render_bullet_list(title: str, items: list[str]) -> None:
-    if not items:
+def _render_navigation() -> str:
+    if "buddy_page" not in st.session_state:
+        st.session_state.buddy_page = "compare"
+
+    _, nav_col, _ = st.columns([0.35, 2.9, 0.35])
+    with nav_col:
+        st.markdown('<div class="buddy-nav-marker"></div>', unsafe_allow_html=True)
+        cols = st.columns(3, gap="small")
+        for col, (key, label, icon) in zip(cols, NAV_ITEMS):
+            with col:
+                active = st.session_state.buddy_page == key
+                if st.button(
+                    f"{icon}  {label}",
+                    key=f"nav_{key}",
+                    use_container_width=True,
+                    type="primary" if active else "secondary",
+                ):
+                    st.session_state.buddy_page = key
+                    st.rerun()
+    return st.session_state.buddy_page
+
+
+def _render_local_debug() -> None:
+    """Developer controls — only visible during genuine local development."""
+    if not is_local_development(_get_api_base_url()):
         return
-    st.markdown(f"**{title}**")
-    for item in items:
-        st.markdown(f"- {item}")
+
+    with st.expander("Developer / Debug (local only)", expanded=False):
+        st.caption(f"API base: {_get_api_base_url()}")
+
+
+def _section_heading(title: str, description: str) -> None:
+    st.markdown(f'<div class="buddy-section-title">{title}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="buddy-section-desc">{description}</div>', unsafe_allow_html=True)
+
+
+def _run_with_status(label: str, endpoint: str, payload: dict) -> tuple[dict | None, str | None]:
+    with st.spinner(label):
+        return _api_post(endpoint, payload)
+
+
+def _render_disclaimer() -> None:
+    st.markdown(
+        '<div class="buddy-disclaimer">'
+        "AI-generated analysis for informational purposes only. Not investment advice."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_analyze_result(result: dict) -> None:
     symbol = result.get("symbol", "")
-    name = result.get("name") or symbol
+    name = result.get("name") or display_name(symbol)
     decision = result.get("decision", {})
     fundamental = result.get("fundamental", {})
     technical = result.get("technical", {})
     sentiment = result.get("sentiment", {})
     master = result.get("master", {})
+    metrics = fundamental.get("metrics", {})
 
-    st.markdown(f"### {name}")
-    st.caption(symbol)
-
-    header_cols = st.columns([2, 1, 1, 1, 1])
-    with header_cols[0]:
-        st.metric("Current price", format_inr(result.get("current_price")))
-    with header_cols[1]:
-        overall = decision.get("overall_score", 0)
-        st.metric("Overall score", format_score(overall), delta=rating_label(decision.get("rating")))
-    with header_cols[2]:
-        st.metric("Fundamental", format_score(decision.get("fundamental_score")))
-    with header_cols[3]:
-        st.metric("Technical", format_score(decision.get("technical_score")))
-    with header_cols[4]:
-        st.metric("Sentiment", format_score(decision.get("sentiment_score")))
-
-    st.divider()
-
-    tab_fund, tab_tech, tab_sent, tab_master = st.tabs(
-        ["Fundamentals", "Technical", "Sentiment", "Master view"]
+    rating = str(decision.get("rating", "—"))
+    overall = decision.get("overall_score")
+    narrative = sanitize_display_text(
+        master.get("narrative") or fundamental.get("summary") or "",
+        [symbol] if symbol else [],
     )
 
-    with tab_fund:
-        metrics = fundamental.get("metrics", {})
-        metric_cols = st.columns(4)
-        metric_cols[0].metric("PE", metrics.get("pe_ratio") or "—")
-        metric_cols[1].metric("PB", metrics.get("pb_ratio") or "—")
-        metric_cols[2].metric("ROE", format_percent(metrics.get("roe")))
-        metric_cols[3].metric("Rev growth", format_percent(metrics.get("revenue_growth")))
+    st.markdown(
+        single_stock_summary_html(name, symbol, overall, rating),
+        unsafe_allow_html=True,
+    )
 
-        _render_bullet_list("Strengths", fundamental.get("strengths", []))
-        _render_bullet_list("Weaknesses", fundamental.get("weaknesses", []))
-        _render_bullet_list("Risks", fundamental.get("risks", []))
-        if fundamental.get("summary"):
-            st.info(fundamental["summary"])
+    st.markdown('<div class="buddy-panel-label">Scorecard</div>', unsafe_allow_html=True)
+    score_rows = [
+        ("Overall", format_score(overall)),
+        ("Fundamental", format_score(decision.get("fundamental_score"))),
+        ("Technical", format_score(decision.get("technical_score"))),
+        ("Sentiment", format_score(decision.get("sentiment_score"))),
+        ("Price", format_inr(result.get("current_price"))),
+        ("P/E", format_ratio(metrics.get("pe_ratio"))),
+        ("P/B", format_ratio(metrics.get("pb_ratio"))),
+        ("Revenue Growth", format_percent(metrics.get("revenue_growth"))),
+    ]
+    st.markdown(metric_summary_table_html(score_rows), unsafe_allow_html=True)
 
-    with tab_tech:
-        tech_cols = st.columns(3)
-        tech_cols[0].metric("Trend", technical.get("trend", "—"))
-        tech_cols[1].metric("Momentum", technical.get("momentum", "—"))
-        tech_cols[2].metric("Volatility", technical.get("volatility", "—"))
+    st.markdown('<div class="buddy-panel-label">Analyst Views</div>', unsafe_allow_html=True)
+    cards = st.columns(3)
+    fund_rating = fundamental.get("rating")
+    sent_class = sentiment.get("sentiment_classification")
 
-        signals = technical.get("signals", [])
-        if signals:
-            signal_rows = [
-                {
-                    "Signal": signal.get("name"),
-                    "Reading": signal.get("value"),
-                    "Bias": signal.get("signal"),
-                }
-                for signal in signals[:8]
-            ]
-            st.dataframe(pd.DataFrame(signal_rows), use_container_width=True, hide_index=True)
-
-        if technical.get("summary"):
-            st.info(technical["summary"])
-
-    with tab_sent:
-        sent_cols = st.columns(2)
-        sent_cols[0].metric(
-            "Sentiment score",
-            format_score(sentiment.get("sentiment_score")),
+    with cards[0]:
+        st.markdown(
+            crisp_analyst_card_html(
+                "Fundamental View",
+                str(fund_rating) if fund_rating else None,
+                fundamental.get("score"),
+                fundamental_view_bullets(fundamental),
+                rating_tone(str(fund_rating) if fund_rating else None),
+            ),
+            unsafe_allow_html=True,
         )
-        sent_cols[1].metric(
-            "Classification",
-            sentiment.get("sentiment_classification", "—"),
+    with cards[1]:
+        st.markdown(
+            crisp_analyst_card_html(
+                "Technical View",
+                str(technical.get("trend")) if technical.get("trend") else None,
+                technical.get("score"),
+                technical_view_bullets(technical),
+                "neutral",
+            ),
+            unsafe_allow_html=True,
+        )
+    with cards[2]:
+        st.markdown(
+            crisp_analyst_card_html(
+                "Sentiment View",
+                str(sent_class) if sent_class else None,
+                sentiment.get("sentiment_score"),
+                sentiment_view_bullets(sentiment),
+                sentiment_tone(str(sent_class) if sent_class else None),
+            ),
+            unsafe_allow_html=True,
         )
 
-        _render_bullet_list("Positive catalysts", sentiment.get("positive_catalysts", []))
-        _render_bullet_list("Negative catalysts", sentiment.get("negative_catalysts", []))
-        _render_bullet_list("Key events", sentiment.get("key_events", []))
+    risks = decision.get("major_risks", []) or master.get("major_risks", [])
+    key_reasons = decision.get("key_reasons", [])
+    st.markdown(
+        analyze_conclusion_card_html(rating, narrative, risks, key_reasons),
+        unsafe_allow_html=True,
+    )
 
-        articles = sentiment.get("articles", [])
-        if articles:
-            st.markdown("**Recent articles**")
+    if risks:
+        st.markdown(
+            section_panel_html(
+                "Risks",
+                "<div class='buddy-card-body'>"
+                + "<br>".join(f"• {r}" for r in risks[:6])
+                + "</div>",
+            ),
+            unsafe_allow_html=True,
+        )
+
+    articles = sentiment.get("articles", [])
+    if articles:
+        with st.expander("News sources", expanded=False):
             for article in articles[:5]:
                 title = article.get("title", "Article")
                 url = article.get("url")
@@ -192,190 +274,277 @@ def _render_analyze_result(result: dict) -> None:
                 else:
                     st.markdown(f"- {title} ({source})")
 
-        if sentiment.get("summary"):
-            st.info(sentiment["summary"])
-
-    with tab_master:
-        _render_bullet_list("Agreement", master.get("agreement_points", []))
-        _render_bullet_list("Disagreement", master.get("disagreement_points", []))
-        _render_bullet_list("Major risks", master.get("major_risks", []))
-        _render_bullet_list("Catalysts", master.get("important_catalysts", []))
-        if master.get("narrative"):
-            st.markdown(master["narrative"])
-        if master.get("data_vs_interpretation"):
-            st.caption(master["data_vs_interpretation"])
-
-    _render_bullet_list("Key reasons", decision.get("key_reasons", []))
-    _render_bullet_list("Major risks", decision.get("major_risks", []))
-
-    sources = result.get("sources", [])
-    if sources:
-        st.markdown("**Sources**")
-        for url in sources:
-            st.markdown(f"- [{url}]({url})")
+    _render_disclaimer()
 
 
 def _render_compare_result(result: dict) -> None:
     stocks = result.get("stocks", [])
-    winner = result.get("winner")
+    if len(stocks) < 2:
+        st.warning("Comparison data is incomplete.")
+        return
 
-    if winner:
-        st.success(f"**Leader:** {winner}")
-        st.caption(result.get("relative_assessment", ""))
-    else:
-        st.info(result.get("relative_assessment", "Scores are closely matched."))
+    st.markdown(comparison_stock_cards_html(result), unsafe_allow_html=True)
 
-    score_df = pd.DataFrame(comparison_score_rows(result))
-    if not score_df.empty:
-        st.dataframe(
-            score_df.set_index("Symbol"),
-            use_container_width=True,
-        )
+    st.markdown('<div class="buddy-panel-label">Scorecard</div>', unsafe_allow_html=True)
+    st.markdown(comparison_scorecard_html(result), unsafe_allow_html=True)
 
-    if len(stocks) >= 2:
-        chart_df = score_df.set_index("Symbol")[["Overall", "Fundamental", "Technical", "Sentiment"]]
-        st.bar_chart(chart_df, height=320)
+    st.markdown('<div class="buddy-panel-label">Where Each Stock Wins</div>', unsafe_allow_html=True)
+    st.markdown(comparison_wins_html(result), unsafe_allow_html=True)
 
-    compare_cols = st.columns(2)
-    narratives = [
-        ("Valuation", result.get("valuation_comparison")),
-        ("Growth", result.get("growth_comparison")),
-        ("Risk", result.get("risk_comparison")),
-        ("Technical trends", result.get("technical_trend_comparison")),
-    ]
-    for index, (title, text) in enumerate(narratives):
-        with compare_cols[index % 2]:
-            if text:
-                st.markdown(f"**{title}**")
-                st.write(text)
+    st.markdown('<div class="buddy-panel-label">Detailed Analysis</div>', unsafe_allow_html=True)
+    st.markdown(comparison_detailed_analysis_html(result), unsafe_allow_html=True)
+
+    st.markdown(ai_conclusion_cards_html(result), unsafe_allow_html=True)
+    _render_disclaimer()
 
 
 def _render_portfolio_result(result: dict) -> None:
-    summary_cols = st.columns(5)
-    summary_cols[0].metric("Invested", format_inr(result.get("total_invested")))
-    summary_cols[1].metric("Current value", format_inr(result.get("total_current_value")))
-    pnl = result.get("total_pnl")
-    pnl_pct = result.get("total_pnl_percent")
-    summary_cols[2].metric(
-        "P&L",
-        format_inr(pnl),
-        delta=format_percent(pnl_pct, signed=True),
-        delta_color=score_delta_color(50 + (pnl_pct or 0)),
-    )
-    summary_cols[3].metric("Portfolio score", format_score(result.get("portfolio_score")))
+    st.markdown(portfolio_summary_cards_html(result), unsafe_allow_html=True)
+
+    holdings_rows = portfolio_holdings_rows(result)
+    if holdings_rows:
+        st.markdown('<div class="buddy-panel-label">Holdings</div>', unsafe_allow_html=True)
+        st.markdown(holdings_table_html(result), unsafe_allow_html=True)
+
     strongest = result.get("strongest_holdings", [])
     weakest = result.get("weakest_holdings", [])
-    summary_cols[4].metric("Holdings", str(len(result.get("holdings", []))))
 
-    if strongest or weakest:
-        highlight_cols = st.columns(2)
-        with highlight_cols[0]:
-            st.markdown(f"**Strongest:** {', '.join(strongest[:3]) or '—'}")
-        with highlight_cols[1]:
-            st.markdown(f"**Weakest:** {', '.join(weakest[:3]) or '—'}")
-
-    holdings_df = pd.DataFrame(portfolio_holdings_rows(result))
-    if not holdings_df.empty:
-        st.markdown("**Holdings**")
-        st.dataframe(holdings_df, use_container_width=True, hide_index=True)
+    st.markdown('<div class="buddy-panel-label">Portfolio Insights</div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+<div class="buddy-conclusion-grid">
+  <div class="buddy-summary-card">
+    <div class="buddy-summary-head"><span class="buddy-detail-icon">🏆</span> Strongest Holdings</div>
+    <div class="buddy-summary-body">{", ".join(format_stock_name(s) for s in strongest[:5]) or "—"}</div>
+  </div>
+  <div class="buddy-summary-card">
+    <div class="buddy-summary-head"><span class="buddy-detail-icon">⚠</span> Weakest Holdings</div>
+    <div class="buddy-summary-body">{", ".join(format_stock_name(s) for s in weakest[:5]) or "—"}</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     sector = result.get("sector_concentration", {})
     if sector:
-        st.markdown("**Sector concentration**")
-        sector_df = pd.DataFrame(
-            {"Sector": list(sector.keys()), "Allocation %": list(sector.values())}
-        ).set_index("Sector")
-        st.bar_chart(sector_df, height=280)
+        sector_rows = [
+            (sector_name, format_percent(value)) for sector_name, value in sector.items()
+        ]
+        st.markdown('<div class="buddy-panel-label">Sector Allocation</div>', unsafe_allow_html=True)
+        st.markdown(metric_summary_table_html(sector_rows), unsafe_allow_html=True)
 
-    if result.get("portfolio_risk"):
-        st.warning(result["portfolio_risk"])
-    if result.get("summary"):
-        st.info(result["summary"])
+    holding_symbols = [
+        h.get("holding", {}).get("symbol", "")
+        for h in result.get("holdings", [])
+        if h.get("holding", {}).get("symbol")
+    ]
+    summary = sanitize_display_text(result.get("summary", ""), holding_symbols)
+    risk = result.get("portfolio_risk", "")
+    if summary or risk:
+        st.markdown(
+            f"""
+<div class="buddy-conclusion-grid">
+  <div class="buddy-summary-card">
+    <div class="buddy-summary-head"><span class="buddy-detail-icon">✦</span> AI Conclusion</div>
+    <div class="buddy-summary-body">{summary or "—"}</div>
+  </div>
+  <div class="buddy-summary-card preferred">
+    <div class="buddy-summary-head"><span class="buddy-detail-icon">◎</span> Risk Overview</div>
+    <div class="buddy-summary-body">{risk or "No major risks flagged."}</div>
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    _render_disclaimer()
 
 
-def render_analyze_mode() -> None:
-    st.subheader("Analyze Stock")
-    query = st.text_input("Ask about a stock", placeholder="How is Reliance doing?")
-    if st.button("Analyze", key="analyze_btn", type="primary"):
+def render_analyze_tab() -> None:
+    _section_heading(
+        "Analyze a Stock",
+        "Get a multi-factor view using fundamentals, technicals, sentiment and AI synthesis.",
+    )
+
+    st.markdown('<div class="buddy-input-marker"></div>', unsafe_allow_html=True)
+    input_cols = st.columns([2.2, 0.8])
+    with input_cols[0]:
+        query = st.text_input(
+            "Ask about a stock",
+            placeholder="How is Reliance doing?",
+            key="analyze_query",
+            label_visibility="visible",
+        )
+    with input_cols[1]:
+        st.markdown(action_button_label_spacer(), unsafe_allow_html=True)
+        analyze_clicked = st.button(
+            "👤  Analyze Stock",
+            type="primary",
+            use_container_width=True,
+            key="analyze_btn",
+        )
+    st.markdown(
+        '<div class="buddy-input-hint compact">Try: "How is Reliance doing?" · "Is TCS a good buy?"</div>',
+        unsafe_allow_html=True,
+    )
+
+    if analyze_clicked:
         if not query.strip():
-            st.warning("Please enter a query.")
+            st.warning("Enter a stock name or question to analyze.")
             return
-        with st.spinner("Running fundamental, technical, and sentiment analysis…"):
-            result = _api_post("/analyze", {"query": query})
+
+        label = query.strip()[:48]
+        result, error = _run_with_status(
+            f"Analyzing {label}…",
+            "/analyze",
+            {"query": query.strip()},
+        )
+        if error:
+            _show_user_error(error)
+            return
         if result:
             _render_analyze_result(result)
 
 
-def render_compare_mode() -> None:
-    st.subheader("Compare Stocks")
-    symbols = st.text_input(
-        "Stock symbols (comma-separated)",
-        placeholder="TATAMOTORS.NS, M&M.NS",
+def render_compare_tab() -> None:
+    _section_heading(
+        "Compare Stocks",
+        "Compare Indian equities across fundamentals, technicals, sentiment and overall setup.",
     )
-    if st.button("Compare", key="compare_btn", type="primary"):
-        stocks = [symbol.strip().upper() for symbol in symbols.split(",") if symbol.strip()]
+
+    st.markdown('<div class="buddy-input-marker"></div>', unsafe_allow_html=True)
+    input_cols = st.columns([1.1, 1.1, 1.4, 0.8])
+    with input_cols[0]:
+        stock_a = st.text_input("Stock 1", value="Reliance", key="compare_stock_1")
+        st.markdown(
+            '<div class="buddy-input-hint compact">e.g. Reliance, TCS</div>',
+            unsafe_allow_html=True,
+        )
+    with input_cols[1]:
+        stock_b = st.text_input("Stock 2", value="Infosys", key="compare_stock_2")
+        st.markdown(
+            '<div class="buddy-input-hint compact">e.g. Infosys, HDFC Bank</div>',
+            unsafe_allow_html=True,
+        )
+    with input_cols[2]:
+        combined = st.text_input(
+            "Additional stocks (optional)",
+            placeholder="TCS, HDFC Bank",
+            key="compare_symbols_extra",
+        )
+        st.markdown(
+            '<div class="buddy-input-hint compact">Comma-separated names</div>',
+            unsafe_allow_html=True,
+        )
+    with input_cols[3]:
+        st.markdown(action_button_label_spacer(), unsafe_allow_html=True)
+        compare_clicked = st.button(
+            "📊  Compare Stocks",
+            type="primary",
+            use_container_width=True,
+            key="compare_btn",
+        )
+
+    if compare_clicked:
+        stocks = build_compare_stock_list(stock_a, stock_b, combined)
+
         if len(stocks) < 2:
-            st.warning("Enter at least two symbols.")
+            st.warning("Enter at least two stocks to compare.")
             return
-        with st.spinner("Comparing stocks side by side…"):
-            result = _api_post("/compare", {"stocks": stocks})
+
+        result, error = _run_with_status(
+            "Comparing stocks…",
+            "/compare",
+            {"stocks": stocks},
+        )
+        if error:
+            _show_user_error(error)
+            return
         if result:
             _render_compare_result(result)
 
 
-def render_portfolio_mode() -> None:
-    st.subheader("Analyze Portfolio")
-    st.caption("Add holdings below — symbols should include the NSE suffix (e.g. RELIANCE.NS).")
-
-    default_df = pd.DataFrame(
-        [
-            {"symbol": "TATAMOTORS.NS", "quantity": 100.0, "buy_price": 700.0},
-            {"symbol": "INFY.NS", "quantity": 50.0, "buy_price": 1500.0},
-        ]
-    )
-    edited = st.data_editor(
-        default_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "symbol": st.column_config.TextColumn("Symbol", required=True),
-            "quantity": st.column_config.NumberColumn("Quantity", min_value=0.0, format="%.2f"),
-            "buy_price": st.column_config.NumberColumn("Buy price (₹)", min_value=0.0, format="%.2f"),
-        },
-        hide_index=True,
+def render_portfolio_tab() -> None:
+    _section_heading(
+        "My Portfolio",
+        "Understand how your holdings are performing and what may require attention.",
     )
 
-    if st.button("Analyze Portfolio", key="portfolio_btn", type="primary"):
+    st.markdown('<div class="buddy-input-marker"></div>', unsafe_allow_html=True)
+    editor_cols = st.columns([4.2, 0.9])
+    with editor_cols[0]:
+        default_df = pd.DataFrame(
+            [
+                {"symbol": "Reliance", "quantity": 10.0, "buy_price": 1000.0},
+                {"symbol": "Infosys", "quantity": 50.0, "buy_price": 1500.0},
+            ]
+        )
+        edited = st.data_editor(
+            default_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "symbol": st.column_config.TextColumn("Stock", required=True),
+                "quantity": st.column_config.NumberColumn("Quantity", min_value=0.0, format="%.2f"),
+                "buy_price": st.column_config.NumberColumn("Buy price (₹)", min_value=0.0, format="%.2f"),
+            },
+            hide_index=True,
+            key="portfolio_editor",
+        )
+    with editor_cols[1]:
+        st.markdown(action_button_label_spacer(), unsafe_allow_html=True)
+        portfolio_clicked = st.button(
+            "💼  Analyze Portfolio",
+            type="primary",
+            use_container_width=True,
+            key="portfolio_btn",
+        )
+    st.markdown(
+        '<div class="buddy-input-hint compact">Enter company names or tickers (e.g. Infosys, RELIANCE, TCS)</div>',
+        unsafe_allow_html=True,
+    )
+
+    if portfolio_clicked:
         try:
             holdings = normalize_holdings(edited.to_dict("records"))
         except ValueError as exc:
-            st.error(str(exc))
+            logger.warning("Portfolio validation failed: %s", exc)
+            _show_user_error(user_friendly_error(status_code=422))
             return
 
-        with st.spinner("Analyzing each holding and aggregating portfolio metrics…"):
-            result = _api_post("/portfolio", {"holdings": holdings})
+        result, error = _run_with_status(
+            "Analyzing portfolio…",
+            "/portfolio",
+            {"holdings": holdings},
+        )
+        if error:
+            _show_user_error(error)
+            return
         if result:
             _render_portfolio_result(result)
 
 
 def main() -> None:
-    st.set_page_config(page_title="Buddy — Stock Analyst", page_icon="📈", layout="wide")
-    st.title("Buddy — Stock Market Analyst")
-    st.caption("AI-powered analysis for Indian equities")
-
-    st.sidebar.header("Navigation")
-    mode = st.sidebar.radio(
-        "Mode",
-        ["Analyze Stock", "Compare Stocks", "Analyze Portfolio"],
+    st.set_page_config(
+        page_title="Buddy — Stock Market Analyst",
+        page_icon="📈",
+        layout="wide",
+        initial_sidebar_state="collapsed",
     )
-    _render_api_sidebar()
 
-    if mode == "Analyze Stock":
-        render_analyze_mode()
-    elif mode == "Compare Stocks":
-        render_compare_mode()
+    _inject_styles()
+    _render_hero()
+    page_key = _render_navigation()
+
+    if page_key == "analyze":
+        render_analyze_tab()
+    elif page_key == "compare":
+        render_compare_tab()
     else:
-        render_portfolio_mode()
+        render_portfolio_tab()
+
+    _render_local_debug()
 
 
 if __name__ == "__main__":

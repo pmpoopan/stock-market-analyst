@@ -82,11 +82,25 @@ class PortfolioMetricsCalculator:
 
         ranked = sorted(
             holdings,
-            key=lambda h: h.decision.overall_score,
+            key=lambda h: (
+                h.decision.overall_score,
+                h.holding.symbol.upper(),
+            ),
             reverse=True,
         )
         strongest = [h.holding.symbol.upper() for h in ranked[:count]]
-        weakest = [h.holding.symbol.upper() for h in ranked[-count:][::-1]]
+        strongest_set = set(strongest)
+
+        weakest_pool = [
+            h for h in ranked if h.holding.symbol.upper() not in strongest_set
+        ]
+        if not weakest_pool:
+            weakest_pool = ranked
+
+        weakest = [
+            h.holding.symbol.upper()
+            for h in weakest_pool[-min(count, len(weakest_pool)) :][::-1]
+        ]
         return strongest, weakest
 
     @staticmethod
