@@ -36,17 +36,19 @@ This project applies **specialized AI agents** for each dimension, orchestrated 
 
 The system fetches market and financial data, runs parallel fundamental, technical, and sentiment analysis, synthesizes results through a Master Analyst, and returns an overall score, rating, key reasons, and risks.
 
+### ⚖️ Stock Comparison
+
+**Example:** *"Compare Tata Motors and Mahindra. Which has the stronger setup?"*
+
+The system compares stocks side by side across fundamentals, technicals, sentiment, and risk, with relative narratives for valuation, growth, technical trends, and an optional overall leader.
+
 ### 💼 Portfolio Analysis
 
 **Example:** *"How is my portfolio doing?"*
 
 Provide multiple holdings (e.g. Tata Motors, Infosys, HDFC Bank) with quantity and buy price. The system analyzes each holding, aggregates P&L, allocation, sector concentration, portfolio score, and strongest/weakest positions.
 
-### ⚖️ Stock Comparison
-
-**Example:** *"Compare Tata Motors and Mahindra. Which has the stronger setup?"*
-
-The system compares stocks side by side across fundamentals, technicals, sentiment, and risk, with relative narratives for valuation, growth, technical trends, and an optional overall leader.
+<img width="1417" height="540" alt="image" src="https://github.com/user-attachments/assets/872f0255-e2a8-4bbc-8247-675957b6ee3c" />
 
 ---
 
