@@ -88,8 +88,9 @@ def test_get_quote_normalizes_symbol(mock_ticker_cls, provider: YahooFinanceProv
 @patch("app.data.yahoo_finance.yf.Ticker")
 def test_get_quote_raises_when_no_price(mock_ticker_cls, provider: YahooFinanceProvider):
     mock_ticker_cls.return_value = _mock_ticker(info={})
-    with pytest.raises(DataNotFoundError, match="No price data"):
-        provider.get_quote(MOCK_SYMBOL)
+    with patch("app.util.retry.time.sleep"):
+        with pytest.raises(DataNotFoundError, match="No price data"):
+            provider.get_quote(MOCK_SYMBOL)
 
 
 @patch("app.data.yahoo_finance.yf.Ticker")

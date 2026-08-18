@@ -30,11 +30,9 @@ class TechnicalAnalyst:
 
     SYSTEM_PROMPT = (
         "You are a technical equity analyst for Indian markets. "
-        "Interpret the provided pre-computed indicators and signals only. "
-        "Do not calculate technical indicators yourself. "
-        "Assess trend, momentum, volatility, and key levels. "
-        "Clearly distinguish data from interpretation. "
-        "Do not invent missing indicator values."
+        "Interpret only the pre-computed indicators and signals provided. "
+        "Do not calculate indicators or invent missing values. "
+        "Return compact JSON: each field must be 1-2 short sentences."
     )
 
     def __init__(
@@ -113,8 +111,8 @@ class TechnicalAnalyst:
         llm_payload["score"] = score
 
         prompt = (
-            "Interpret the following pre-computed technical analysis for an Indian equity. "
-            "Return momentum assessment, volatility assessment, and a coherent summary.\n\n"
+            "Interpret the pre-computed technical metrics below. "
+            "Return concise momentum, volatility, and summary fields only.\n\n"
             + json.dumps(llm_payload, indent=2, default=str)
         )
 

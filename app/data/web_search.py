@@ -9,13 +9,20 @@ import json
 import logging
 from datetime import date, datetime
 
-from duckduckgo_search import DDGS
+try:
+    from ddgs import DDGS
+except ImportError:  # pragma: no cover - fallback for legacy installs
+    from duckduckgo_search import DDGS
 
 from app.config.settings import Settings, get_settings
 from app.data.exceptions import DataProviderError
 from app.data.interfaces import CacheProvider
 from app.models.schemas import NewsArticle
-from app.util.retry import is_rate_limit_error, sync_retry_with_backoff
+from app.util.retry import (
+    is_rate_limit_error,
+    is_transient_timeout_error,
+    sync_retry_with_backoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +87,13 @@ class DuckDuckGoSearchProvider:
                     exc,
                 )
                 self._cache_rate_limited(cache_key)
+                return []
+            if is_transient_timeout_error(exc):
+                logger.warning(
+                    "DuckDuckGo search timed out for '%s': %s",
+                    normalized_query,
+                    exc,
+                )
                 return []
             raise DataProviderError(
                 f"News search failed for '{normalized_query}': {exc}"

@@ -49,6 +49,24 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     return any(marker in message for marker in RATE_LIMIT_MARKERS)
 
 
+def is_token_exhaustion_error(exc: BaseException) -> bool:
+    """Return True when Groq structured JSON output hit the completion token limit."""
+    message = str(exc).lower()
+    return (
+        "json_validate_failed" in message
+        or "max completion tokens reached" in message
+        or "max tokens reached before generating a valid document" in message
+    )
+
+
+def is_transient_timeout_error(exc: BaseException) -> bool:
+    """Return True for timeout errors that should not fail the whole workflow."""
+    if isinstance(exc, TimeoutError):
+        return True
+    message = str(exc).lower()
+    return "timeout" in message or "timed out" in message
+
+
 def parse_retry_after_seconds(exc: BaseException) -> float | None:
     """Extract retry-after delay from exception message or response headers."""
     response = getattr(exc, "response", None)

@@ -74,6 +74,24 @@ class SQLiteCache:
         except sqlite3.Error as exc:
             raise CacheError(f"Cache read failed for {namespace}/{key}: {exc}") from exc
 
+    def get_allow_stale(self, namespace: str, key: str) -> str | None:
+        """Return a cached value even if expired (does not delete stale entries)."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT value
+                    FROM cache_entries
+                    WHERE namespace = ? AND cache_key = ?
+                    """,
+                    (namespace, key),
+                ).fetchone()
+                if row is None:
+                    return None
+                return row["value"]
+        except sqlite3.Error as exc:
+            raise CacheError(f"Stale cache read failed for {namespace}/{key}: {exc}") from exc
+
     def set(
         self,
         namespace: str,

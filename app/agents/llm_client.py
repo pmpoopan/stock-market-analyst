@@ -11,11 +11,15 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.agents.llm_exceptions import LLMRateLimitError
 from app.config.settings import Settings, get_settings
-from app.util.retry import async_retry_with_backoff, is_rate_limit_error
+from app.util.retry import (
+    async_retry_with_backoff,
+    is_rate_limit_error,
+    is_token_exhaustion_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +156,15 @@ class GroqLLMClient(LLMClient):
             self._semaphore = asyncio.Semaphore(limit)
         return self._semaphore
 
+    def _boost_token_budget(self, current_tokens: int) -> int | None:
+        boosted = min(
+            current_tokens + self._settings.llm_structured_output_retry_boost,
+            self._settings.llm_structured_output_retry_max_tokens,
+        )
+        if boosted <= current_tokens:
+            return None
+        return boosted
+
     async def generate(
         self,
         prompt: str,
@@ -175,42 +188,88 @@ class GroqLLMClient(LLMClient):
         ]
 
         completion_tokens = max_tokens or self._settings.llm_max_tokens
-        kwargs: dict[str, Any] = {
+        base_kwargs: dict[str, Any] = {
             "model": self._settings.groq_model,
             "messages": messages,
             "temperature": self._settings.llm_temperature,
-            "max_tokens": completion_tokens,
         }
         if structured_output is not None:
-            kwargs["response_format"] = {"type": "json_object"}
+            base_kwargs["response_format"] = {"type": "json_object"}
 
-        async def _call_groq() -> str:
+        async def _call_groq(tokens: int) -> str:
             client = self._get_client()
             async with self._get_semaphore():
-                response = await client.chat.completions.create(**kwargs)
+                response = await client.chat.completions.create(
+                    **base_kwargs,
+                    max_tokens=tokens,
+                )
             return response.choices[0].message.content or ""
 
-        try:
-            content = await async_retry_with_backoff(
-                _call_groq,
+        async def _invoke_with_rate_limit_retry(tokens: int) -> str:
+            return await async_retry_with_backoff(
+                lambda: _call_groq(tokens),
                 max_attempts=self._settings.llm_retry_max_attempts,
                 base_delay=self._settings.llm_retry_base_delay_seconds,
                 max_delay=self._settings.llm_retry_max_delay_seconds,
                 operation_name="Groq LLM",
                 retry_on=is_rate_limit_error,
             )
-        except Exception as exc:
-            if is_rate_limit_error(exc):
-                logger.error(
-                    "Groq rate limit exceeded after %d attempts: %s",
-                    self._settings.llm_retry_max_attempts,
-                    exc,
-                )
-                raise LLMRateLimitError(USER_FACING_RATE_LIMIT_MESSAGE) from exc
-            raise
+
+        tokens = completion_tokens
+        content: str | None = None
+        token_boost_attempted = False
+
+        while True:
+            try:
+                content = await _invoke_with_rate_limit_retry(tokens)
+                break
+            except Exception as exc:
+                if is_rate_limit_error(exc):
+                    logger.error(
+                        "Groq rate limit exceeded after %d attempts: %s",
+                        self._settings.llm_retry_max_attempts,
+                        exc,
+                    )
+                    raise LLMRateLimitError(USER_FACING_RATE_LIMIT_MESSAGE) from exc
+
+                if (
+                    structured_output is not None
+                    and not token_boost_attempted
+                    and is_token_exhaustion_error(exc)
+                ):
+                    boosted_tokens = self._boost_token_budget(tokens)
+                    if boosted_tokens is not None:
+                        logger.warning(
+                            "Structured output token exhaustion at %d tokens; "
+                            "retrying once with %d tokens: %s",
+                            tokens,
+                            boosted_tokens,
+                            exc,
+                        )
+                        tokens = boosted_tokens
+                        token_boost_attempted = True
+                        continue
+
+                raise
 
         if structured_output is not None:
-            return structured_output.model_validate_json(content)
+            try:
+                return structured_output.model_validate_json(content or "")
+            except ValidationError as exc:
+                if not token_boost_attempted:
+                    boosted_tokens = self._boost_token_budget(tokens)
+                    if boosted_tokens is not None:
+                        logger.warning(
+                            "Structured output JSON validation failed at %d tokens; "
+                            "retrying once with %d tokens: %s",
+                            tokens,
+                            boosted_tokens,
+                            exc,
+                        )
+                        token_boost_attempted = True
+                        content = await _invoke_with_rate_limit_retry(boosted_tokens)
+                        return structured_output.model_validate_json(content or "")
+                raise
 
         return content
 

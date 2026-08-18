@@ -27,14 +27,10 @@ class MasterAnalyst:
     """Compare three analyst perspectives and produce coherent narrative."""
 
     SYSTEM_PROMPT = (
-        "You are a senior equity research analyst synthesizing multiple perspectives "
-        "for Indian equities. Compare fundamental, technical, and sentiment analyses. "
-        "Identify agreement and disagreement between perspectives. "
-        "Highlight major risks and important catalysts. "
-        "Never invent missing data, metrics, or news. "
-        "Clearly distinguish reported data from your interpretation. "
-        "Do not blindly average scores — explain conflicts explicitly, e.g. "
-        "'Fundamentals are strong, but technical momentum has weakened.'"
+        "You are a senior equity research analyst synthesizing Indian equity perspectives. "
+        "Compare fundamental, technical, and sentiment outputs only. "
+        "Never invent data, metrics, or news. "
+        "Return compact JSON: max 2 short items per list; narrative max 3 sentences."
     )
 
     def __init__(self, llm: LLMClient) -> None:
@@ -50,9 +46,9 @@ class MasterAnalyst:
         payload = build_master_llm_payload(symbol, fundamental, technical, sentiment)
 
         prompt = (
-            "Synthesize the following analyst outputs for an Indian equity. "
-            "Explain agreement, disagreement, risks, and catalysts. "
-            "Use only the data provided.\n\n"
+            "Synthesize the analyst outputs below into agreement, disagreement, "
+            "risks, catalysts, narrative, and data-vs-interpretation fields. "
+            "Use only provided data.\n\n"
             + json.dumps(payload, indent=2, default=str)
         )
 

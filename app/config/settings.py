@@ -35,15 +35,17 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 1024
     llm_max_tokens_fundamental: int = 640
-    llm_max_tokens_technical: int = 512
+    llm_max_tokens_technical: int = 768
     llm_max_tokens_sentiment: int = 640
-    llm_max_tokens_master: int = 768
+    llm_max_tokens_master: int = 1024
     llm_max_tokens_comparison: int = 1024
     llm_max_tokens_portfolio: int = 768
     llm_max_concurrent_requests: int = 2
     llm_retry_max_attempts: int = 3
     llm_retry_base_delay_seconds: float = 1.0
     llm_retry_max_delay_seconds: float = 30.0
+    llm_structured_output_retry_boost: int = 256
+    llm_structured_output_retry_max_tokens: int = 1280
 
     # Data providers
     yahoo_finance_timeout: int = 30

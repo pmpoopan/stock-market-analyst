@@ -25,6 +25,10 @@ CACHE_NS_HISTORICAL = "historical"
 CACHE_NS_FINANCIALS = "financials"
 
 
+class TransientYahooQuoteError(Exception):
+    """Raised when Yahoo returns an empty quote that may succeed on retry."""
+
+
 class YahooFinanceProvider(BaseDataProvider):
     """Yahoo Finance implementation with optional caching."""
 
@@ -62,15 +66,28 @@ class YahooFinanceProvider(BaseDataProvider):
                 self._tickers[normalized] = ticker
             return ticker
 
-    def _with_retry(self, operation_name: str, operation):
+    def _with_retry(self, operation_name: str, operation, *, retry_on=None):
         return sync_retry_with_backoff(
             operation,
             max_attempts=self._settings.yahoo_retry_max_attempts,
             base_delay=self._settings.yahoo_retry_base_delay_seconds,
             max_delay=self._settings.yahoo_retry_max_delay_seconds,
             operation_name=operation_name,
-            retry_on=is_rate_limit_error,
+            retry_on=retry_on or is_rate_limit_error,
         )
+
+    def _cache_get_stale(
+        self,
+        namespace: str,
+        key: str,
+        model: type[Quote | HistoricalData | FinancialMetrics],
+    ):
+        if self._cache is None or not hasattr(self._cache, "get_allow_stale"):
+            return None
+        raw = self._cache.get_allow_stale(namespace, key)
+        if raw is None:
+            return None
+        return model.model_validate_json(raw)
 
     def _cache_get(self, namespace: str, key: str, model: type[Quote | HistoricalData | FinancialMetrics]):
         if self._cache is None:
@@ -119,7 +136,7 @@ class YahooFinanceProvider(BaseDataProvider):
                 or info.get("previousClose")
             )
             if price is None:
-                raise DataNotFoundError(f"No price data available for {normalized}")
+                raise TransientYahooQuoteError(f"No price data available for {normalized}")
 
             previous_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
             change = None
@@ -140,13 +157,33 @@ class YahooFinanceProvider(BaseDataProvider):
                 timestamp=datetime.now(timezone.utc),
             )
 
+        def _is_retryable_quote_error(exc: BaseException) -> bool:
+            return is_rate_limit_error(exc) or isinstance(exc, TransientYahooQuoteError)
+
         try:
-            quote = self._with_retry(f"Yahoo quote {normalized}", _fetch_quote)
+            quote = self._with_retry(
+                f"Yahoo quote {normalized}",
+                _fetch_quote,
+                retry_on=_is_retryable_quote_error,
+            )
         except DataNotFoundError:
             raise
+        except TransientYahooQuoteError as exc:
+            stale = self._cache_get_stale(CACHE_NS_QUOTES, cache_key, Quote)
+            if stale is not None:
+                logger.warning(
+                    "Using stale cached quote for %s after empty Yahoo response",
+                    normalized,
+                )
+                return stale
+            raise DataNotFoundError(str(exc)) from exc
         except Exception as exc:
             if is_rate_limit_error(exc):
                 logger.error("Yahoo Finance rate limit fetching quote for %s: %s", normalized, exc)
+                stale = self._cache_get_stale(CACHE_NS_QUOTES, cache_key, Quote)
+                if stale is not None:
+                    logger.warning("Using stale cached quote for %s after rate limit", normalized)
+                    return stale
             raise DataProviderError(
                 f"Failed to fetch quote for {normalized}: {exc}"
             ) from exc

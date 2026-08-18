@@ -13,7 +13,7 @@ groq>=0.11.0
 
 # Data
 yfinance>=0.2.48
-duckduckgo-search>=6.3.0
+ddgs>=9.0.0
 pandas>=2.2.0
 numpy>=2.1.0
 

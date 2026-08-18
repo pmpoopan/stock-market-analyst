@@ -4,7 +4,7 @@ import pytest
 
 from app.agents.llm_client import MockLLMClient
 from app.agents.sentiment_agent import SentimentAnalyst
-from app.models.schemas import SentimentAnalysisResult, SentimentInterpretation
+from app.models.schemas import NewsArticle, SentimentAnalysisResult, SentimentInterpretation
 from tests.fixtures.market_data import MOCK_SYMBOL
 from tests.fixtures.news_data import (
     MOCK_NEWS_DUPLICATE,
@@ -90,7 +90,7 @@ async def test_analyze_no_articles_neutral():
 @pytest.mark.asyncio
 async def test_analyze_fallback_when_llm_fails():
     class FailingLLM(MockLLMClient):
-        async def generate(self, prompt, system=None, structured_output=None):
+        async def generate(self, prompt, system=None, structured_output=None, max_tokens=None):
             raise RuntimeError("LLM unavailable")
 
     analyst = SentimentAnalyst(
@@ -99,3 +99,17 @@ async def test_analyze_fallback_when_llm_fails():
     )
     result = await analyst.analyze(MOCK_SYMBOL, company_name="Reliance Industries")
     assert MOCK_SYMBOL in result.summary
+
+
+@pytest.mark.asyncio
+async def test_analyze_survives_search_timeout():
+    class TimeoutSearchProvider(MockNewsSearchProvider):
+        def search_news(self, query: str, max_results: int = 10) -> list[NewsArticle]:
+            raise TimeoutError("search timed out")
+
+    analyst = SentimentAnalyst(news_search=TimeoutSearchProvider(), llm=MockLLMClient())
+    result = await analyst.analyze(MOCK_SYMBOL, company_name="Reliance Industries")
+
+    assert result.stock == MOCK_SYMBOL
+    assert len(result.articles) == 0
+    assert "No recent news" in result.summary

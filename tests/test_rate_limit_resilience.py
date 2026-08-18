@@ -12,13 +12,19 @@ from app.agents.llm_client import GroqLLMClient, MockLLMClient
 from app.agents.llm_exceptions import LLMRateLimitError
 from app.api.error_messages import select_primary_error, user_facing_api_error
 from app.config.settings import Settings
-from app.data.exceptions import DataProviderError
+from app.data.exceptions import DataNotFoundError, DataProviderError
 from app.data.web_search import DuckDuckGoSearchProvider
-from app.data.yahoo_finance import YahooFinanceProvider
+from app.data.yahoo_finance import CACHE_NS_QUOTES, YahooFinanceProvider
 from app.graph.deps import GraphDependencies
 from app.graph.workflow import AnalysisOrchestrator
-from app.models.schemas import ErrorDetail, TechnicalInterpretation
-from app.util.retry import async_retry_with_backoff, is_rate_limit_error, sync_retry_with_backoff
+from app.models.schemas import ErrorDetail, MasterInterpretation, TechnicalInterpretation
+from app.util.retry import (
+    async_retry_with_backoff,
+    is_rate_limit_error,
+    is_token_exhaustion_error,
+    is_transient_timeout_error,
+    sync_retry_with_backoff,
+)
 from tests.fixtures.fundamental_data import make_mock_financial_metrics
 from tests.fixtures.market_data import (
     MOCK_SYMBOL,
@@ -27,6 +33,11 @@ from tests.fixtures.market_data import (
     make_mock_historical_long,
     make_mock_quote,
 )
+
+
+@pytest.fixture
+def provider(cache, test_settings):
+    return YahooFinanceProvider(cache=cache, settings=test_settings)
 
 
 class RateLimitError(Exception):
@@ -117,7 +128,7 @@ async def test_groq_client_passes_agent_max_tokens():
     settings = Settings(
         groq_api_key="test-key",
         llm_max_tokens=1024,
-        llm_max_tokens_technical=512,
+        llm_max_tokens_technical=768,
         llm_retry_max_attempts=1,
     )
     client = GroqLLMClient(settings=settings)
@@ -134,7 +145,7 @@ async def test_groq_client_passes_agent_max_tokens():
     )
 
     kwargs = groq_client.chat.completions.create.await_args.kwargs
-    assert kwargs["max_tokens"] == 512
+    assert kwargs["max_tokens"] == 768
 
 
 @pytest.mark.asyncio
@@ -148,11 +159,13 @@ def test_token_budget_settings_defaults():
     settings = Settings()
     assert settings.llm_max_tokens == 1024
     assert settings.llm_max_tokens_fundamental == 640
-    assert settings.llm_max_tokens_technical == 512
+    assert settings.llm_max_tokens_technical == 768
     assert settings.llm_max_tokens_sentiment == 640
-    assert settings.llm_max_tokens_master == 768
+    assert settings.llm_max_tokens_master == 1024
     assert settings.llm_max_tokens_comparison == 1024
     assert settings.llm_max_tokens_portfolio == 768
+    assert settings.llm_structured_output_retry_boost == 256
+    assert settings.llm_structured_output_retry_max_tokens == 1280
 
 
 @patch("app.data.yahoo_finance.yf.Ticker")
@@ -298,3 +311,145 @@ async def test_comparison_still_requires_two_complete_stocks(graph_deps):
             technical_analysis={},
             sentiment_analysis={},
         )
+
+
+class TokenExhaustionError(Exception):
+    status_code = 400
+
+    def __init__(self) -> None:
+        super().__init__(
+            'Error code: 400 - {"error":{"message":"max completion tokens reached '
+            'before generating a valid document","type":"json_validate_failed"}}'
+        )
+
+
+def test_is_token_exhaustion_error_detects_groq_message():
+    assert is_token_exhaustion_error(TokenExhaustionError())
+    assert not is_token_exhaustion_error(Exception("network down"))
+
+
+def test_is_transient_timeout_error():
+    assert is_transient_timeout_error(TimeoutError())
+    assert is_transient_timeout_error(Exception("read timed out"))
+    assert not is_transient_timeout_error(Exception("network down"))
+
+
+@pytest.mark.asyncio
+async def test_groq_client_retries_structured_output_with_boosted_tokens():
+    settings = Settings(
+        groq_api_key="test-key",
+        llm_max_tokens_technical=768,
+        llm_structured_output_retry_boost=256,
+        llm_structured_output_retry_max_tokens=1280,
+        llm_retry_max_attempts=1,
+    )
+    client = GroqLLMClient(settings=settings)
+    groq_client = MagicMock()
+    success = MagicMock()
+    success.choices = [
+        MagicMock(message=MagicMock(content='{"momentum":"m","volatility":"v","summary":"s"}'))
+    ]
+    groq_client.chat.completions.create = AsyncMock(
+        side_effect=[TokenExhaustionError(), success]
+    )
+    client._client = groq_client
+
+    result = await client.generate(
+        "prompt",
+        structured_output=TechnicalInterpretation,
+        max_tokens=settings.llm_max_tokens_technical,
+    )
+
+    assert isinstance(result, TechnicalInterpretation)
+    assert groq_client.chat.completions.create.await_count == 2
+    first_tokens = groq_client.chat.completions.create.await_args_list[0].kwargs["max_tokens"]
+    second_tokens = groq_client.chat.completions.create.await_args_list[1].kwargs["max_tokens"]
+    assert first_tokens == 768
+    assert second_tokens == 1024
+
+
+@pytest.mark.asyncio
+async def test_groq_client_master_token_budget():
+    settings = Settings(
+        groq_api_key="test-key",
+        llm_max_tokens_master=1024,
+        llm_retry_max_attempts=1,
+    )
+    client = GroqLLMClient(settings=settings)
+    groq_client = MagicMock()
+    success = MagicMock()
+    success.choices = [
+        MagicMock(
+            message=MagicMock(
+                content=(
+                    '{"agreement_points":["a"],"disagreement_points":["b"],'
+                    '"major_risks":["r"],"important_catalysts":["c"],'
+                    '"narrative":"n","data_vs_interpretation":"d"}'
+                )
+            )
+        )
+    ]
+    groq_client.chat.completions.create = AsyncMock(return_value=success)
+    client._client = groq_client
+
+    result = await client.generate(
+        "prompt",
+        structured_output=MasterInterpretation,
+        max_tokens=settings.llm_max_tokens_master,
+    )
+
+    assert isinstance(result, MasterInterpretation)
+    assert groq_client.chat.completions.create.await_args.kwargs["max_tokens"] == 1024
+
+
+@patch("app.data.web_search.DDGS")
+def test_web_search_returns_empty_on_timeout(mock_ddgs_cls, cache, test_settings):
+    provider = DuckDuckGoSearchProvider(cache=cache, settings=test_settings, max_results=5)
+    mock_ddgs_cls.return_value.__enter__.side_effect = TimeoutError("timed out")
+    articles = provider.search_news("Reliance stock India news")
+    assert articles == []
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+def test_get_quote_retries_empty_price_then_raises(mock_ticker_cls, provider):
+    mock_ticker = MagicMock()
+    mock_ticker.info = {}
+    mock_ticker_cls.return_value = mock_ticker
+
+    with patch("app.util.retry.time.sleep"):
+        with pytest.raises(DataNotFoundError, match="No price data"):
+            provider.get_quote(MOCK_SYMBOL)
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+@patch.object(YahooFinanceProvider, "_cache_get", return_value=None)
+def test_get_quote_uses_stale_cache_after_empty_response(
+    mock_cache_get, mock_ticker_cls, provider
+):
+    cached_quote = make_mock_quote(MOCK_SYMBOL)
+    provider._cache_set(CACHE_NS_QUOTES, MOCK_SYMBOL, cached_quote, ttl_seconds=300)
+
+    mock_ticker = MagicMock()
+    mock_ticker.info = {}
+    mock_ticker_cls.return_value = mock_ticker
+
+    with patch("app.util.retry.time.sleep"):
+        quote = provider.get_quote(MOCK_SYMBOL)
+
+    assert quote.price == cached_quote.price
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+@patch.object(YahooFinanceProvider, "_cache_get", return_value=None)
+def test_get_quote_uses_stale_cache_after_rate_limit(
+    mock_cache_get, mock_ticker_cls, provider
+):
+    cached_quote = make_mock_quote(MOCK_SYMBOL)
+    provider._cache_set(CACHE_NS_QUOTES, MOCK_SYMBOL, cached_quote, ttl_seconds=300)
+
+    mock_ticker_cls.side_effect = RateLimitError("Too Many Requests")
+
+    with patch("app.util.retry.time.sleep"):
+        quote = provider.get_quote(MOCK_SYMBOL)
+
+    assert quote.price == cached_quote.price
