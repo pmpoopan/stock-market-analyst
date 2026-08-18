@@ -30,6 +30,8 @@ This project applies **specialized AI agents** for each dimension, orchestrated 
 
 ## What It Can Do
 
+<img width="1417" height="540" alt="image" src="https://github.com/user-attachments/assets/872f0255-e2a8-4bbc-8247-675957b6ee3c" />
+
 ### 📊 Single Stock Analysis
 
 **Example:** *"How is Reliance doing?"*
@@ -47,8 +49,6 @@ The system compares stocks side by side across fundamentals, technicals, sentime
 **Example:** *"How is my portfolio doing?"*
 
 Provide multiple holdings (e.g. Tata Motors, Infosys, HDFC Bank) with quantity and buy price. The system analyzes each holding, aggregates P&L, allocation, sector concentration, portfolio score, and strongest/weakest positions.
-
-<img width="1417" height="540" alt="image" src="https://github.com/user-attachments/assets/872f0255-e2a8-4bbc-8247-675957b6ee3c" />
 
 ---
 
