@@ -40,6 +40,13 @@ def test_ttl_expiry(cache: SQLiteCache):
     assert cache.get("quotes", "RELIANCE.NS") is None
 
 
+def test_expired_entry_remains_available_via_get_allow_stale(cache: SQLiteCache):
+    cache.set("quotes", "RELIANCE.NS", '{"price": 1450.25}', ttl_seconds=1)
+    time.sleep(1.1)
+    assert cache.get("quotes", "RELIANCE.NS") is None
+    assert cache.get_allow_stale("quotes", "RELIANCE.NS") == '{"price": 1450.25}'
+
+
 def test_set_without_ttl_persists(cache: SQLiteCache):
     cache.set("quotes", "RELIANCE.NS", "persistent", ttl_seconds=None)
     assert cache.get("quotes", "RELIANCE.NS") == "persistent"

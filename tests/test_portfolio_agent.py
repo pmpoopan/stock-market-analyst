@@ -92,3 +92,57 @@ async def test_analyze_uses_custom_llm_interpretation(graph_deps):
 
     assert result.portfolio_risk == "Custom portfolio risk."
     assert result.summary == "Custom portfolio summary."
+
+
+@pytest.mark.asyncio
+async def test_analyze_from_state_continues_when_one_holding_missing_quote(portfolio_analyst):
+    from app.models.schemas import FundamentalAnalysisResult
+
+    holdings = [
+        PortfolioHolding(symbol=MOCK_SYMBOL, quantity=10, buy_price=1000),
+        PortfolioHolding(symbol="INFY.NS", quantity=5, buy_price=1400),
+    ]
+    decision = DecisionResult(
+        stock=MOCK_SYMBOL,
+        overall_score=72.0,
+        rating=Rating.BUY,
+        fundamental_score=75.0,
+        technical_score=70.0,
+        sentiment_score=60.0,
+        risk_adjustment=0.0,
+        key_reasons=["k"],
+        major_risks=["r"],
+    )
+    infy_decision = decision.model_copy(update={"stock": "INFY.NS"})
+    metrics = make_mock_financial_metrics()
+    fundamental = FundamentalAnalysisResult(
+        stock=MOCK_SYMBOL,
+        score=75.0,
+        rating=Rating.BUY,
+        metrics=metrics,
+        strengths=["s"],
+        weaknesses=["w"],
+        risks=["r"],
+        summary="summary",
+    )
+
+    result = await portfolio_analyst.analyze_from_state(
+        holdings=holdings,
+        decisions={MOCK_SYMBOL: decision, "INFY.NS": infy_decision},
+        market_data={
+            MOCK_SYMBOL: {
+                "symbol": MOCK_SYMBOL,
+                "price": 1450.25,
+                "currency": "INR",
+                "name": "Reliance",
+            }
+        },
+        fundamental_analysis={
+            MOCK_SYMBOL: fundamental,
+            "INFY.NS": fundamental.model_copy(update={"stock": "INFY.NS"}),
+        },
+    )
+
+    assert len(result.holdings) == 1
+    assert result.holdings[0].holding.symbol == MOCK_SYMBOL
+    assert result.portfolio_score >= 0

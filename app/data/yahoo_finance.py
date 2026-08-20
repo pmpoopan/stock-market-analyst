@@ -68,19 +68,44 @@ class YahooFinanceProvider(BaseDataProvider):
                 self._tickers[normalized] = ticker
             return ticker
 
+    @staticmethod
+    def _info_is_usable(info: dict[str, Any]) -> bool:
+        """True when Yahoo info has real quote or valuation fields (not an empty 429 body)."""
+        if not info:
+            return False
+        return any(
+            info.get(key) is not None
+            for key in (
+                "currentPrice",
+                "regularMarketPrice",
+                "previousClose",
+                "trailingPE",
+                "forwardPE",
+                "priceToBook",
+            )
+        )
+
     def _get_ticker_info(self, symbol: str) -> dict[str, Any]:
-        """Reuse Yahoo info within the quote TTL to avoid duplicate ticker.info calls."""
+        """Reuse Yahoo info within the quote TTL to avoid duplicate ticker.info calls.
+
+        Empty or unusable payloads are not cached. Caching them would make quote
+        retries and later get_financials() reuse a failed rate-limit body, dropping
+        Price/P/E/P/B while income-statement fields still work.
+        """
         normalized = self._normalize_symbol(symbol)
         now = time.monotonic()
         cached = self._info_cache.get(normalized)
         if cached is not None:
             cached_at, info = cached
-            if now - cached_at < self._ttl_quotes:
+            if now - cached_at < self._ttl_quotes and self._info_is_usable(info):
                 return info
 
         ticker = self._get_ticker(normalized)
         info = ticker.info or {}
-        self._info_cache[normalized] = (now, info)
+        if self._info_is_usable(info):
+            self._info_cache[normalized] = (now, info)
+        else:
+            self._info_cache.pop(normalized, None)
         return info
 
     def _with_retry(self, operation_name: str, operation, *, retry_on=None):
@@ -141,37 +166,29 @@ class YahooFinanceProvider(BaseDataProvider):
                 info = self._get_ticker_info(normalized)
             except Exception as exc:
                 if is_rate_limit_error(exc):
+                    cached = self._cached_quote_without_yahoo(normalized)
+                    if cached is not None:
+                        logger.warning(
+                            "Using cached quote for %s after Yahoo rate limit",
+                            normalized,
+                        )
+                        return cached
                     raise
                 raise DataProviderError(
                     f"Failed to fetch quote for {normalized}: {exc}"
                 ) from exc
 
-            price = (
-                info.get("currentPrice")
-                or info.get("regularMarketPrice")
-                or info.get("previousClose")
-            )
-            if price is None:
+            quote = self._quote_from_info(normalized, info)
+            if quote is None:
+                cached = self._cached_quote_without_yahoo(normalized)
+                if cached is not None:
+                    logger.warning(
+                        "Using cached quote for %s after empty Yahoo info",
+                        normalized,
+                    )
+                    return cached
                 raise TransientYahooQuoteError(f"No price data available for {normalized}")
-
-            previous_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
-            change = None
-            change_percent = None
-            if previous_close is not None:
-                change = round(price - previous_close, 4)
-                if previous_close != 0:
-                    change_percent = round((change / previous_close) * 100, 4)
-
-            return Quote(
-                symbol=normalized,
-                name=info.get("shortName") or info.get("longName"),
-                price=float(price),
-                currency=info.get("currency", "INR"),
-                change=change,
-                change_percent=change_percent,
-                market_cap=info.get("marketCap"),
-                timestamp=datetime.now(timezone.utc),
-            )
+            return quote
 
         def _is_retryable_quote_error(exc: BaseException) -> bool:
             return is_rate_limit_error(exc) or isinstance(exc, TransientYahooQuoteError)
@@ -185,21 +202,42 @@ class YahooFinanceProvider(BaseDataProvider):
         except DataNotFoundError:
             raise
         except TransientYahooQuoteError as exc:
-            stale = self._cache_get_stale(CACHE_NS_QUOTES, cache_key, Quote)
-            if stale is not None:
-                logger.warning(
-                    "Using stale cached quote for %s after empty Yahoo response",
-                    normalized,
-                )
-                return stale
+            fallback = self._fallback_quote(normalized, reason="empty Yahoo quote/info")
+            if fallback is not None:
+                return fallback
             raise DataNotFoundError(str(exc)) from exc
         except Exception as exc:
             if is_rate_limit_error(exc):
                 logger.error("Yahoo Finance rate limit fetching quote for %s: %s", normalized, exc)
-                stale = self._cache_get_stale(CACHE_NS_QUOTES, cache_key, Quote)
-                if stale is not None:
-                    logger.warning("Using stale cached quote for %s after rate limit", normalized)
-                    return stale
+                fallback = self._fallback_quote(normalized, reason="Yahoo quote rate limit")
+                if fallback is not None:
+                    return fallback
+            raise DataProviderError(
+                f"Failed to fetch quote for {normalized}: {exc}"
+            ) from exc
+
+        def _is_retryable_quote_error(exc: BaseException) -> bool:
+            return is_rate_limit_error(exc) or isinstance(exc, TransientYahooQuoteError)
+
+        try:
+            quote = self._with_retry(
+                f"Yahoo quote {normalized}",
+                _fetch_quote,
+                retry_on=_is_retryable_quote_error,
+            )
+        except DataNotFoundError:
+            raise
+        except TransientYahooQuoteError as exc:
+            fallback = self._fallback_quote(normalized, reason="empty Yahoo quote/info")
+            if fallback is not None:
+                return fallback
+            raise DataNotFoundError(str(exc)) from exc
+        except Exception as exc:
+            if is_rate_limit_error(exc):
+                logger.error("Yahoo Finance rate limit fetching quote for %s: %s", normalized, exc)
+                fallback = self._fallback_quote(normalized, reason="Yahoo quote rate limit")
+                if fallback is not None:
+                    return fallback
             raise DataProviderError(
                 f"Failed to fetch quote for {normalized}: {exc}"
             ) from exc
@@ -270,6 +308,103 @@ class YahooFinanceProvider(BaseDataProvider):
 
         self._cache_set(CACHE_NS_HISTORICAL, cache_key, historical, self._ttl_historical)
         return historical
+
+    def _quote_from_info(self, symbol: str, info: dict[str, Any]) -> Quote | None:
+        price = (
+            info.get("currentPrice")
+            or info.get("regularMarketPrice")
+            or info.get("previousClose")
+        )
+        if price is None:
+            return None
+
+        previous_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
+        change = None
+        change_percent = None
+        if previous_close is not None:
+            change = round(float(price) - previous_close, 4)
+            if previous_close != 0:
+                change_percent = round((change / previous_close) * 100, 4)
+
+        return Quote(
+            symbol=symbol,
+            name=info.get("shortName") or info.get("longName"),
+            price=float(price),
+            currency=info.get("currency", "INR"),
+            change=change,
+            change_percent=change_percent,
+            market_cap=info.get("marketCap"),
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    def _quote_from_last_close(self, symbol: str, close: float) -> Quote:
+        return Quote(
+            symbol=symbol,
+            name=None,
+            price=float(close),
+            currency="INR",
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    def _latest_close_from_cached_historical(self, symbol: str) -> float | None:
+        for period in ("1y", "6mo", "3mo", "1mo", "5d"):
+            cached = self._cache_get(CACHE_NS_HISTORICAL, f"{symbol}:{period}", HistoricalData)
+            if cached is None:
+                cached = self._cache_get_stale(
+                    CACHE_NS_HISTORICAL, f"{symbol}:{period}", HistoricalData
+                )
+            if cached is not None and cached.bars:
+                return cached.bars[-1].close
+        return None
+
+    def _latest_close_from_yahoo_history(self, symbol: str) -> float | None:
+        try:
+            ticker = self._get_ticker(symbol)
+            df = ticker.history(period="5d", auto_adjust=True)
+        except Exception as exc:
+            if is_rate_limit_error(exc):
+                logger.warning(
+                    "Yahoo 5d history also rate limited while falling back for %s: %s",
+                    symbol,
+                    exc,
+                )
+            else:
+                logger.warning("Yahoo 5d history fallback failed for %s: %s", symbol, exc)
+            return None
+
+        if df is None or getattr(df, "empty", True):
+            return None
+        try:
+            last = df["Close"].dropna().iloc[-1]
+            return float(last)
+        except Exception:
+            return None
+
+    def _cached_quote_without_yahoo(self, symbol: str) -> Quote | None:
+        """Return stale quote or cached OHLCV close without calling Yahoo."""
+        stale = self._cache_get_stale(CACHE_NS_QUOTES, symbol, Quote)
+        if stale is not None and stale.price is not None:
+            return stale
+
+        cached_close = self._latest_close_from_cached_historical(symbol)
+        if cached_close is not None:
+            return self._quote_from_last_close(symbol, cached_close)
+        return None
+
+    def _fallback_quote(self, symbol: str, *, reason: str) -> Quote | None:
+        cached = self._cached_quote_without_yahoo(symbol)
+        if cached is not None:
+            logger.warning("Using cached quote for %s after %s", symbol, reason)
+            return cached
+
+        history_close = self._latest_close_from_yahoo_history(symbol)
+        if history_close is not None:
+            logger.warning("Using Yahoo 5d last close for %s after %s", symbol, reason)
+            quote = self._quote_from_last_close(symbol, history_close)
+            self._cache_set(CACHE_NS_QUOTES, symbol, quote, self._ttl_quotes)
+            return quote
+
+        return None
 
     def get_financials(self, symbol: str) -> FinancialMetrics:
         from app.analysis.fundamental_metrics import FundamentalMetricsCalculator

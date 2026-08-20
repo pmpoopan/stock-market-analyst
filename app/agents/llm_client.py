@@ -9,7 +9,8 @@ import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from types import UnionType
+from typing import Any, Union, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
@@ -133,6 +134,56 @@ class MockLLMClient(LLMClient):
         raise ValueError(f"No mock structured response registered for {model_type}")
 
 
+def _example_value_for_annotation(annotation: Any) -> Any:
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is list:
+        inner = args[0] if args else str
+        return [_example_value_for_annotation(inner)]
+    if origin is dict:
+        return {"key": "example"}
+    if origin in (Union, UnionType):
+        non_none = [arg for arg in args if arg is not type(None)]
+        if non_none:
+            return _example_value_for_annotation(non_none[0])
+    if annotation is int:
+        return 0
+    if annotation is float:
+        return 0.0
+    if annotation is bool:
+        return False
+    return "example"
+
+
+def structured_output_example(model_type: type[BaseModel]) -> dict[str, Any]:
+    """Compact instance example — not a JSON Schema with Field descriptions."""
+    return {
+        name: _example_value_for_annotation(field.annotation)
+        for name, field in model_type.model_fields.items()
+    }
+
+
+def json_looks_truncated_or_invalid(content: str | None) -> bool:
+    text = (content or "").strip()
+    if not text:
+        return True
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
+def json_looks_like_schema(content: str | None) -> bool:
+    try:
+        parsed = json.loads((content or "").strip())
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and "properties" in parsed and (
+        parsed.get("type") == "object" or "title" in parsed or "$defs" in parsed
+    )
+
+
 class GroqLLMClient(LLMClient):
     """Groq-backed LLM client for production interpretation."""
 
@@ -147,7 +198,12 @@ class GroqLLMClient(LLMClient):
         if self._client is None:
             from groq import AsyncGroq
 
-            self._client = AsyncGroq(api_key=self._settings.groq_api_key)
+            # Application retry policy owns 429 handling. The Groq SDK otherwise
+            # retries with Retry-After (6s, 13s, 23s, …) on top of our attempts.
+            self._client = AsyncGroq(
+                api_key=self._settings.groq_api_key,
+                max_retries=0,
+            )
         return self._client
 
     def _get_semaphore(self) -> asyncio.Semaphore:
@@ -174,12 +230,14 @@ class GroqLLMClient(LLMClient):
     ) -> str | Any:
         system_content = system or "You are a helpful financial analysis assistant."
         if structured_output is not None:
-            schema_hint = json.dumps(
-                structured_output.model_json_schema(),
+            example = json.dumps(
+                structured_output_example(structured_output),
                 separators=(",", ":"),
             )
             system_content += (
-                "\nRespond with valid JSON only, matching this schema:\n" + schema_hint
+                "\nRespond with a JSON object only, using these keys and value types. "
+                "Do not return a JSON Schema, field descriptions, or metadata.\n"
+                + example
             )
 
         messages = [
@@ -256,7 +314,13 @@ class GroqLLMClient(LLMClient):
             try:
                 return structured_output.model_validate_json(content or "")
             except ValidationError as exc:
-                if not token_boost_attempted:
+                if json_looks_like_schema(content):
+                    logger.warning(
+                        "Structured output looked like a JSON Schema instead of an instance: %s",
+                        exc,
+                    )
+                    raise
+                if not token_boost_attempted and json_looks_truncated_or_invalid(content):
                     boosted_tokens = self._boost_token_budget(tokens)
                     if boosted_tokens is not None:
                         logger.warning(

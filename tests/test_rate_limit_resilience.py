@@ -369,6 +369,56 @@ async def test_comparison_succeeds_when_one_stock_fails(graph_deps):
 
 
 @pytest.mark.asyncio
+async def test_comparison_succeeds_when_one_stock_quote_missing(graph_deps):
+    failing_symbol = "M&M.NS"
+    market = MockMarketDataProvider(
+        historical={
+            f"{MOCK_SYMBOL}:1y": make_mock_historical_long(MOCK_SYMBOL),
+            f"{MOCK_SYMBOL_2}:1y": make_mock_historical_long(MOCK_SYMBOL_2),
+        },
+        financials={
+            MOCK_SYMBOL: make_mock_financial_metrics(MOCK_SYMBOL),
+            MOCK_SYMBOL_2: make_mock_financial_metrics(MOCK_SYMBOL_2),
+        },
+        quotes={
+            MOCK_SYMBOL: make_mock_quote(MOCK_SYMBOL),
+            MOCK_SYMBOL_2: make_mock_quote(MOCK_SYMBOL_2),
+        },
+    )
+    original_get_quote = market.get_quote
+
+    def get_quote(symbol: str):
+        if symbol.upper() == failing_symbol:
+            raise DataProviderError("Quote fetch failed: Too Many Requests")
+        return original_get_quote(symbol)
+
+    market.get_quote = get_quote  # type: ignore[method-assign]
+
+    deps = GraphDependencies(
+        query_parser=graph_deps.query_parser,
+        fundamental_analyst=graph_deps.fundamental_analyst.__class__(
+            market, graph_deps.fundamental_analyst._llm
+        ),
+        technical_analyst=graph_deps.technical_analyst.__class__(
+            market, graph_deps.technical_analyst._llm
+        ),
+        sentiment_analyst=graph_deps.sentiment_analyst,
+        master_analyst=graph_deps.master_analyst,
+        comparison_analyst=ComparisonAnalyst(graph_deps.comparison_analyst._llm),
+        portfolio_analyst=graph_deps.portfolio_analyst,
+        scoring_engine=graph_deps.scoring_engine,
+        market_data=market,
+    )
+    orchestrator = AnalysisOrchestrator(deps=deps)
+    state = await orchestrator.compare([MOCK_SYMBOL, MOCK_SYMBOL_2, failing_symbol])
+
+    result = state.get("comparison_analysis")
+    assert result is not None
+    assert len(result.stocks) == 2
+    assert failing_symbol not in result.stocks
+
+
+@pytest.mark.asyncio
 async def test_comparison_still_requires_two_complete_stocks(graph_deps):
     analyst = ComparisonAnalyst(MockLLMClient())
     with pytest.raises(ValueError, match="At least two stocks with complete analysis"):
@@ -480,8 +530,11 @@ def test_web_search_returns_empty_on_timeout(mock_ddgs_cls, cache, test_settings
 
 @patch("app.data.yahoo_finance.yf.Ticker")
 def test_get_quote_retries_empty_price_then_raises(mock_ticker_cls, provider):
+    import pandas as pd
+
     mock_ticker = MagicMock()
     mock_ticker.info = {}
+    mock_ticker.history.return_value = pd.DataFrame()
     mock_ticker_cls.return_value = mock_ticker
 
     with patch("app.util.retry.time.sleep"):
@@ -494,11 +547,14 @@ def test_get_quote_retries_empty_price_then_raises(mock_ticker_cls, provider):
 def test_get_quote_uses_stale_cache_after_empty_response(
     mock_cache_get, mock_ticker_cls, provider
 ):
+    import pandas as pd
+
     cached_quote = make_mock_quote(MOCK_SYMBOL)
     provider._cache_set(CACHE_NS_QUOTES, MOCK_SYMBOL, cached_quote, ttl_seconds=300)
 
     mock_ticker = MagicMock()
     mock_ticker.info = {}
+    mock_ticker.history.return_value = pd.DataFrame()
     mock_ticker_cls.return_value = mock_ticker
 
     with patch("app.util.retry.time.sleep"):

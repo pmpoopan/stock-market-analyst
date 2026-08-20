@@ -63,11 +63,8 @@ class SQLiteCache:
 
                 expires_at = row["expires_at"]
                 if expires_at is not None and expires_at <= time.time():
-                    conn.execute(
-                        "DELETE FROM cache_entries WHERE namespace = ? AND cache_key = ?",
-                        (namespace, key),
-                    )
-                    conn.commit()
+                    # Keep the row so get_allow_stale() can still recover it
+                    # after Yahoo rate limits. purge_expired() handles cleanup.
                     return None
 
                 return row["value"]

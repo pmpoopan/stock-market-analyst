@@ -102,6 +102,53 @@ async def test_analyze_fallback_when_llm_fails():
 
 
 @pytest.mark.asyncio
+async def test_analyze_falls_back_when_structured_output_is_schema_echo():
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.agents.llm_client import GroqLLMClient
+    from app.config.settings import Settings
+
+    settings = Settings(groq_api_key="test-key", llm_retry_max_attempts=1)
+    llm = GroqLLMClient(settings=settings)
+    groq_client = MagicMock()
+    groq_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(content=json.dumps(SentimentInterpretation.model_json_schema()))
+                )
+            ]
+        )
+    )
+    llm._client = groq_client
+
+    analyst = SentimentAnalyst(news_search=MockNewsSearchProvider(), llm=llm)
+    result = await analyst.analyze(MOCK_SYMBOL, company_name="Reliance Industries")
+
+    assert result.stock == MOCK_SYMBOL
+    assert result.summary
+    assert groq_client.chat.completions.create.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ddgs_timeout_returns_empty_news_without_failing_analysis(cache, test_settings):
+    from unittest.mock import patch
+
+    from app.data.web_search import DuckDuckGoSearchProvider
+
+    provider = DuckDuckGoSearchProvider(cache=cache, settings=test_settings, max_results=5)
+    with patch("app.data.web_search.DDGS") as mock_ddgs_cls:
+        mock_ddgs_cls.return_value.__enter__.side_effect = TimeoutError("timed out")
+        analyst = SentimentAnalyst(news_search=provider, llm=MockLLMClient())
+        result = await analyst.analyze(MOCK_SYMBOL, company_name="Reliance Industries")
+
+    assert result.stock == MOCK_SYMBOL
+    assert result.articles == []
+    assert result.sentiment_score == 50.0
+
+
+@pytest.mark.asyncio
 async def test_analyze_survives_search_timeout():
     class TimeoutSearchProvider(MockNewsSearchProvider):
         def search_news(self, query: str, max_results: int = 10) -> list[NewsArticle]:

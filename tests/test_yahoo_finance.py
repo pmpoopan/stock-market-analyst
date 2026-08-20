@@ -87,7 +87,7 @@ def test_get_quote_normalizes_symbol(mock_ticker_cls, provider: YahooFinanceProv
 
 @patch("app.data.yahoo_finance.yf.Ticker")
 def test_get_quote_raises_when_no_price(mock_ticker_cls, provider: YahooFinanceProvider):
-    mock_ticker_cls.return_value = _mock_ticker(info={})
+    mock_ticker_cls.return_value = _mock_ticker(info={}, history=pd.DataFrame())
     with patch("app.util.retry.time.sleep"):
         with pytest.raises(DataNotFoundError, match="No price data"):
             provider.get_quote(MOCK_SYMBOL)
@@ -222,3 +222,74 @@ def test_get_financials_uses_stale_cache_after_rate_limit(
 
     assert metrics.pe_ratio == stale.pe_ratio
     assert metrics.pb_ratio == stale.pb_ratio
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+def test_empty_yahoo_info_is_not_cached_so_financials_refetch(
+    mock_ticker_cls, provider: YahooFinanceProvider
+):
+    combined = {**MOCK_YAHOO_INFO, **MOCK_FUNDAMENTAL_INFO}
+    ticker = _mock_ticker(info={}, history=pd.DataFrame())
+    type(ticker).info = PropertyMock(side_effect=[{}, {}, {}, combined])
+    mock_ticker_cls.return_value = ticker
+
+    with patch("app.util.retry.time.sleep"):
+        with pytest.raises(DataNotFoundError, match="No price data"):
+            provider.get_quote(MOCK_SYMBOL)
+
+    metrics = provider.get_financials(MOCK_SYMBOL)
+
+    assert metrics.pe_ratio == pytest.approx(22.5)
+    assert metrics.pb_ratio == pytest.approx(2.4)
+    assert metrics.revenue_growth == pytest.approx(12.0)
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+def test_get_quote_uses_history_last_close_when_info_empty(
+    mock_ticker_cls, provider: YahooFinanceProvider
+):
+    mock_ticker_cls.return_value = _mock_ticker(info={}, history=make_mock_history_dataframe())
+
+    with patch("app.util.retry.time.sleep"):
+        quote = provider.get_quote(MOCK_SYMBOL)
+
+    assert quote.price == 1440.0
+    assert quote.name is None
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+def test_get_quote_uses_expired_sqlite_cache_after_rate_limit(
+    mock_ticker_cls, provider: YahooFinanceProvider, cache
+):
+    import time
+
+    cached_quote = make_mock_quote(MOCK_SYMBOL)
+    cache.set("quotes", MOCK_SYMBOL, cached_quote.model_dump_json(), ttl_seconds=1)
+    time.sleep(1.1)
+    assert cache.get("quotes", MOCK_SYMBOL) is None
+    assert cache.get_allow_stale("quotes", MOCK_SYMBOL) is not None
+
+    mock_ticker_cls.side_effect = RuntimeError("Too Many Requests. Rate limited.")
+
+    with patch("app.util.retry.time.sleep"):
+        quote = provider.get_quote(MOCK_SYMBOL)
+
+    assert quote.price == cached_quote.price
+    assert quote.name == cached_quote.name
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+def test_yahoo_429_does_not_erase_valid_cached_quote(
+    mock_ticker_cls, provider: YahooFinanceProvider, cache
+):
+    cached_quote = make_mock_quote(MOCK_SYMBOL)
+    cache.set("quotes", MOCK_SYMBOL, cached_quote.model_dump_json(), ttl_seconds=300)
+    mock_ticker_cls.side_effect = RuntimeError("Too Many Requests. Rate limited.")
+
+    quote = provider.get_quote(MOCK_SYMBOL)
+
+    assert quote.price == cached_quote.price
+    mock_ticker_cls.assert_not_called()
+    stored = cache.get("quotes", MOCK_SYMBOL)
+    assert stored is not None
+    assert '"price":1450.25' in stored.replace(" ", "") or "1450.25" in stored
