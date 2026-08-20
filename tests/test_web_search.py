@@ -44,7 +44,41 @@ def test_search_news_fetches_from_ddg(mock_ddgs_cls, search_provider):
     assert len(articles) == 2
     assert all(isinstance(a, NewsArticle) for a in articles)
     assert articles[0].title == "Reliance profit beats estimates"
-    mock_ddgs.news.assert_called_once()
+    mock_ddgs.news.assert_called_once_with(
+        query="Reliance stock India news",
+        region="in-en",
+        timelimit="m",
+        max_results=5,
+    )
+
+
+@patch("app.data.web_search.DDGS")
+def test_search_news_calls_ddgs_with_query_argument(mock_ddgs_cls, search_provider):
+    """Regression: ddgs>=9 requires news(query=...), not keywords=..."""
+
+    class FakeDDGS:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def news(self, query: str, **kwargs):
+            if not query:
+                raise TypeError("DDGS.news() missing 1 required positional argument: 'query'")
+            if "keywords" in kwargs:
+                raise TypeError("news() got an unexpected keyword argument 'keywords'")
+            assert kwargs.get("region") == "in-en"
+            assert kwargs.get("timelimit") == "m"
+            assert kwargs.get("max_results") == 5
+            return MOCK_DDG_RESULTS
+
+    mock_ddgs_cls.return_value = FakeDDGS()
+
+    articles = search_provider.search_news("Reliance stock India news")
+
+    assert len(articles) == 2
+    assert str(articles[0].url) == "https://example.com/reliance-profit"
 
 
 @patch("app.data.web_search.DDGS")

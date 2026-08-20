@@ -94,6 +94,30 @@ def test_build_comparison_returns_narratives():
     assert MOCK_SYMBOL in result.relative_assessment
 
 
+def test_technical_comparison_includes_rsi_when_present():
+    stocks = [MOCK_SYMBOL, MOCK_SYMBOL_2]
+    decisions = {
+        MOCK_SYMBOL: _decision(MOCK_SYMBOL, 80, 78, 72, 65),
+        MOCK_SYMBOL_2: _decision(MOCK_SYMBOL_2, 65, 60, 62, 58),
+    }
+    fundamentals = {symbol: _fundamental(symbol) for symbol in stocks}
+    technical = {
+        MOCK_SYMBOL: _technical(MOCK_SYMBOL, 72),
+        MOCK_SYMBOL_2: _technical(MOCK_SYMBOL_2, 62, TrendDirection.SIDEWAYS),
+    }
+    technical[MOCK_SYMBOL].indicators = {"latest": {"rsi_14": 61.4}}
+    technical[MOCK_SYMBOL_2].indicators = {"latest": {"rsi_14": 48.2}}
+
+    result = ComparisonMetricsCalculator.build_comparison(
+        stocks, decisions, fundamentals, technical
+    )
+
+    assert "RSI 61.4" in result.technical_trend_comparison
+    assert "RSI 48.2" in result.technical_trend_comparison
+    assert "uptrend" in result.technical_trend_comparison
+    assert "technical score 72/100" in result.technical_trend_comparison
+
+
 def test_scoring_engine_compare_scores():
     engine = ScoringEngine()
     decisions = {

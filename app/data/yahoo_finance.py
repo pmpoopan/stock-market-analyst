@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,6 +42,7 @@ class YahooFinanceProvider(BaseDataProvider):
         self._settings = settings or get_settings()
         self._ticker_lock = threading.Lock()
         self._tickers: dict[str, yf.Ticker] = {}
+        self._info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     @property
     def _ttl_quotes(self) -> int:
@@ -65,6 +67,21 @@ class YahooFinanceProvider(BaseDataProvider):
                 ticker = yf.Ticker(normalized)
                 self._tickers[normalized] = ticker
             return ticker
+
+    def _get_ticker_info(self, symbol: str) -> dict[str, Any]:
+        """Reuse Yahoo info within the quote TTL to avoid duplicate ticker.info calls."""
+        normalized = self._normalize_symbol(symbol)
+        now = time.monotonic()
+        cached = self._info_cache.get(normalized)
+        if cached is not None:
+            cached_at, info = cached
+            if now - cached_at < self._ttl_quotes:
+                return info
+
+        ticker = self._get_ticker(normalized)
+        info = ticker.info or {}
+        self._info_cache[normalized] = (now, info)
+        return info
 
     def _with_retry(self, operation_name: str, operation, *, retry_on=None):
         return sync_retry_with_backoff(
@@ -121,8 +138,7 @@ class YahooFinanceProvider(BaseDataProvider):
 
         def _fetch_quote() -> Quote:
             try:
-                ticker = self._get_ticker(normalized)
-                info = ticker.info or {}
+                info = self._get_ticker_info(normalized)
             except Exception as exc:
                 if is_rate_limit_error(exc):
                     raise
@@ -271,7 +287,7 @@ class YahooFinanceProvider(BaseDataProvider):
         def _fetch_financials() -> FinancialMetrics:
             try:
                 ticker = self._get_ticker(normalized)
-                info = ticker.info or {}
+                info = self._get_ticker_info(normalized)
                 income_stmt = self._safe_statement(ticker, ["financials", "income_stmt"])
                 balance_sheet = self._safe_statement(ticker, ["balance_sheet"])
                 cashflow = self._safe_statement(ticker, ["cashflow", "cash_flow"])
@@ -317,6 +333,13 @@ class YahooFinanceProvider(BaseDataProvider):
                     normalized,
                     exc,
                 )
+                stale = self._cache_get_stale(CACHE_NS_FINANCIALS, cache_key, FinancialMetrics)
+                if stale is not None:
+                    logger.warning(
+                        "Using stale cached financials for %s after rate limit",
+                        normalized,
+                    )
+                    return stale
             raise DataProviderError(
                 f"Failed to fetch financials for {normalized}: {exc}"
             ) from exc

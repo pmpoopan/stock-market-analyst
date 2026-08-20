@@ -88,6 +88,9 @@ async def test_analyze_fallback_when_llm_fails(mock_market_long):
 
     assert MOCK_SYMBOL in result.summary
     assert "ATR" in result.volatility
+    assert result.score >= 0
+    assert result.trend is not None
+    assert result.indicators["latest"].get("rsi_14") is not None
 
 
 @pytest.mark.asyncio

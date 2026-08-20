@@ -79,7 +79,11 @@ class ComparisonAnalyst:
             {symbol: sentiment_analysis[symbol] for symbol in available},
         )
 
-        return base.model_copy(update=narratives)
+        # Keep deterministic metric narratives (PE/PB/growth/risk/trend/RSI).
+        # LLM may only enrich the overall relative assessment.
+        return base.model_copy(
+            update={"relative_assessment": narratives["relative_assessment"]}
+        )
 
     async def _interpret_with_llm(
         self,

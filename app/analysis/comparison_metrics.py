@@ -177,8 +177,17 @@ class ComparisonMetricsCalculator:
             if result is None:
                 continue
             trend_text = trend_labels.get(result.trend, result.trend.value)
+            rsi = None
+            latest = result.indicators.get("latest") if result.indicators else None
+            if isinstance(latest, dict):
+                rsi = latest.get("rsi_14")
+            rsi_text = (
+                f", RSI {rsi:.1f}"
+                if isinstance(rsi, (int, float))
+                else ", RSI unavailable"
+            )
             lines.append(
-                f"{symbol}: {trend_text}, technical score {result.score:.0f}/100"
+                f"{symbol}: {trend_text}, technical score {result.score:.0f}/100{rsi_text}"
             )
             trend_scores[symbol] = result.score
 

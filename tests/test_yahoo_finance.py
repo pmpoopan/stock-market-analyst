@@ -1,6 +1,6 @@
 """Tests for Yahoo Finance provider — uses mocked yfinance, no live API calls."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pandas as pd
 import pytest
@@ -8,7 +8,7 @@ import pytest
 from app.data.exceptions import DataNotFoundError, DataProviderError
 from app.data.yahoo_finance import YahooFinanceProvider
 from app.models.schemas import FinancialMetrics, HistoricalData, Quote
-from tests.fixtures.fundamental_data import MOCK_FUNDAMENTAL_INFO
+from tests.fixtures.fundamental_data import MOCK_FUNDAMENTAL_INFO, make_mock_financial_metrics
 from tests.fixtures.market_data import (
     MOCK_SYMBOL,
     MOCK_YAHOO_INFO,
@@ -187,3 +187,38 @@ def test_mock_market_data_provider():
     assert quote.price == make_mock_quote().price
     assert len(historical.bars) == 5
     assert financials.symbol == MOCK_SYMBOL
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+def test_quote_and_financials_reuse_yahoo_info(mock_ticker_cls, provider: YahooFinanceProvider):
+    info = {**MOCK_YAHOO_INFO, **MOCK_FUNDAMENTAL_INFO}
+    ticker = _mock_ticker(info=info)
+    info_property = PropertyMock(return_value=info)
+    type(ticker).info = info_property
+    mock_ticker_cls.return_value = ticker
+
+    quote = provider.get_quote(MOCK_SYMBOL)
+    metrics = provider.get_financials(MOCK_SYMBOL)
+
+    assert quote.price == 1450.25
+    assert metrics.pe_ratio == pytest.approx(22.5)
+    assert metrics.pb_ratio == pytest.approx(2.4)
+    assert metrics.revenue_growth == pytest.approx(12.0)
+    assert metrics.earnings_growth == pytest.approx(15.0)
+    assert info_property.call_count == 1
+
+
+@patch("app.data.yahoo_finance.yf.Ticker")
+@patch.object(YahooFinanceProvider, "_cache_get", return_value=None)
+def test_get_financials_uses_stale_cache_after_rate_limit(
+    mock_cache_get, mock_ticker_cls, provider: YahooFinanceProvider
+):
+    stale = make_mock_financial_metrics(MOCK_SYMBOL)
+    provider._cache_set("financials", MOCK_SYMBOL, stale, ttl_seconds=86400)
+    mock_ticker_cls.side_effect = RuntimeError("Too Many Requests. Rate limited.")
+
+    with patch("app.util.retry.time.sleep"):
+        metrics = provider.get_financials(MOCK_SYMBOL)
+
+    assert metrics.pe_ratio == stale.pe_ratio
+    assert metrics.pb_ratio == stale.pb_ratio

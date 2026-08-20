@@ -25,6 +25,8 @@ async def test_compare_from_state(graph_deps):
     assert result.overall_scores[MOCK_SYMBOL] >= 0
     assert result.valuation_comparison
     assert result.relative_assessment
+    assert "PE" in result.valuation_comparison
+    assert "technical score" in result.technical_trend_comparison
 
 
 @pytest.mark.asyncio
@@ -52,5 +54,9 @@ async def test_compare_uses_custom_llm_interpretation(graph_deps):
     state = await orchestrator.compare([MOCK_SYMBOL, MOCK_SYMBOL_2])
     result = state["comparison_analysis"]
 
-    assert result.valuation_comparison == "Custom valuation narrative."
     assert result.relative_assessment == "Custom relative assessment."
+    assert "PE" in result.valuation_comparison
+    assert "Custom valuation narrative." not in result.valuation_comparison
+    assert "technical score" in result.technical_trend_comparison
+    assert result.growth_comparison != "Custom growth narrative."
+    assert result.risk_comparison != "Custom risk narrative."

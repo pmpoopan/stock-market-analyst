@@ -112,4 +112,5 @@ async def test_analyze_survives_search_timeout():
 
     assert result.stock == MOCK_SYMBOL
     assert len(result.articles) == 0
+    assert result.sentiment_score == 50.0
     assert "No recent news" in result.summary

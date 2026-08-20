@@ -9,10 +9,7 @@ import json
 import logging
 from datetime import date, datetime
 
-try:
-    from ddgs import DDGS
-except ImportError:  # pragma: no cover - fallback for legacy installs
-    from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 from app.config.settings import Settings, get_settings
 from app.data.exceptions import DataProviderError
@@ -123,7 +120,7 @@ class DuckDuckGoSearchProvider:
         articles: list[NewsArticle] = []
         with DDGS() as ddgs:
             results = ddgs.news(
-                keywords=query,
+                query=query,
                 region=DEFAULT_REGION,
                 timelimit="m",
                 max_results=limit,
