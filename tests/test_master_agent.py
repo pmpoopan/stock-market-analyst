@@ -74,6 +74,14 @@ async def test_synthesize_uses_mock_llm():
     assert result.narrative == "Custom narrative."
     assert result.agreement_points == ["Custom agreement"]
     assert len(llm.calls) == 1
+    system = llm.calls[0]["system"]
+    prompt = llm.calls[0]["prompt"]
+    assert "1-2 short sentences" in system
+    assert "max 2 short items" in system
+    assert "one short sentence" in system
+    assert "1-2 short sentences" in prompt
+    assert '"fundamental"' in prompt
+    assert "\n  " not in prompt.split("\n\n", 1)[-1]
 
 
 @pytest.mark.asyncio

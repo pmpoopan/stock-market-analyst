@@ -190,14 +190,14 @@ class MasterAnalysisResult(BaseModel):
 class MasterInterpretation(BaseModel):
     """LLM output for master synthesis — scores come from analyst agents."""
 
-    agreement_points: list[str] = Field(..., description="Areas where analyses agree")
-    disagreement_points: list[str] = Field(..., description="Conflicts between analyses")
-    major_risks: list[str] = Field(..., description="Major risks across perspectives")
-    important_catalysts: list[str] = Field(..., description="Important catalysts")
-    narrative: str = Field(..., description="Coherent cross-perspective narrative")
+    agreement_points: list[str] = Field(..., description="Max 2 short agreement points")
+    disagreement_points: list[str] = Field(..., description="Max 2 short disagreement points")
+    major_risks: list[str] = Field(..., description="Max 2 short risks")
+    important_catalysts: list[str] = Field(..., description="Max 2 short catalysts")
+    narrative: str = Field(..., description="1-2 short sentences of cross-perspective narrative")
     data_vs_interpretation: str = Field(
         ...,
-        description="What is data vs interpretation",
+        description="One short sentence distinguishing data vs interpretation",
     )
 
 

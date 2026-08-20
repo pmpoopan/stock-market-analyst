@@ -23,6 +23,7 @@ from app.util.retry import (
     is_rate_limit_error,
     is_token_exhaustion_error,
     is_transient_timeout_error,
+    parse_retry_after_seconds,
     sync_retry_with_backoff,
 )
 from tests.fixtures.fundamental_data import make_mock_financial_metrics
@@ -124,6 +125,58 @@ async def test_groq_client_retries_then_raises_clean_rate_limit_error():
 
 
 @pytest.mark.asyncio
+async def test_groq_client_retries_429_once_and_respects_retry_after():
+    settings = Settings(
+        groq_api_key="test-key",
+        llm_retry_max_attempts=2,
+        llm_retry_base_delay_seconds=10.0,
+        llm_retry_max_delay_seconds=30.0,
+        llm_max_concurrent_requests=1,
+    )
+    client = GroqLLMClient(settings=settings)
+    groq_client = MagicMock()
+    success = MagicMock()
+    success.choices = [MagicMock(message=MagicMock(content="ok"))]
+    groq_client.chat.completions.create = AsyncMock(
+        side_effect=[RateLimitError("Rate limit reached for model"), success]
+    )
+    client._client = groq_client
+
+    sleep_mock = AsyncMock()
+    with patch("app.util.retry.asyncio.sleep", sleep_mock):
+        result = await client.generate("prompt")
+
+    assert result == "ok"
+    assert groq_client.chat.completions.create.await_count == 2
+    sleep_mock.assert_awaited_once()
+    assert sleep_mock.await_args.args[0] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_groq_client_default_retry_budget_is_one_retry():
+    settings = Settings(
+        groq_api_key="test-key",
+        llm_retry_max_attempts=2,
+        llm_retry_base_delay_seconds=0.01,
+        llm_retry_max_delay_seconds=0.05,
+        llm_max_concurrent_requests=1,
+    )
+    client = GroqLLMClient(settings=settings)
+    groq_client = MagicMock()
+    groq_client.chat.completions.create = AsyncMock(
+        side_effect=RateLimitError("Rate limit reached for model")
+    )
+    client._client = groq_client
+
+    with patch("app.util.retry.asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(LLMRateLimitError, match="temporarily busy"):
+            await client.generate("prompt")
+
+    assert groq_client.chat.completions.create.await_count == 2
+    assert client._get_semaphore()._value == 1
+
+
+@pytest.mark.asyncio
 async def test_groq_client_passes_agent_max_tokens():
     settings = Settings(
         groq_api_key="test-key",
@@ -153,6 +206,21 @@ async def test_mock_llm_records_max_tokens():
     llm = MockLLMClient()
     await llm.generate("prompt", max_tokens=640)
     assert llm.calls[0]["max_tokens"] == 640
+
+
+def test_llm_concurrency_and_retry_defaults():
+    assert Settings.model_fields["llm_max_concurrent_requests"].default == 1
+    assert Settings.model_fields["llm_retry_max_attempts"].default == 2
+
+
+def test_parse_retry_after_seconds_from_headers_and_message():
+    header_exc = RateLimitError()
+    assert parse_retry_after_seconds(header_exc) == 2.0
+    message_exc = Exception("Please retry after 3 seconds")
+    assert parse_retry_after_seconds(message_exc) == 3.0
+    ms_exc = Exception("retry-after: 1500 ms")
+    assert parse_retry_after_seconds(ms_exc) == 1.5
+    assert parse_retry_after_seconds(Exception("no delay")) is None
 
 
 def test_token_budget_settings_defaults():

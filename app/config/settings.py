@@ -40,8 +40,8 @@ class Settings(BaseSettings):
     llm_max_tokens_master: int = 1024
     llm_max_tokens_comparison: int = 1024
     llm_max_tokens_portfolio: int = 768
-    llm_max_concurrent_requests: int = 2
-    llm_retry_max_attempts: int = 3
+    llm_max_concurrent_requests: int = 1
+    llm_retry_max_attempts: int = 2
     llm_retry_base_delay_seconds: float = 1.0
     llm_retry_max_delay_seconds: float = 30.0
     llm_structured_output_retry_boost: int = 256

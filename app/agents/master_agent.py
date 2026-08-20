@@ -30,7 +30,10 @@ class MasterAnalyst:
         "You are a senior equity research analyst synthesizing Indian equity perspectives. "
         "Compare fundamental, technical, and sentiment outputs only. "
         "Never invent data, metrics, or news. "
-        "Return compact JSON: max 2 short items per list; narrative max 3 sentences."
+        "Return compact JSON only. Limits: "
+        "agreement_points max 2 short items; disagreement_points max 2 short items; "
+        "major_risks max 2 short items; important_catalysts max 2 short items; "
+        "narrative 1-2 short sentences; data_vs_interpretation one short sentence."
     )
 
     def __init__(self, llm: LLMClient) -> None:
@@ -46,10 +49,12 @@ class MasterAnalyst:
         payload = build_master_llm_payload(symbol, fundamental, technical, sentiment)
 
         prompt = (
-            "Synthesize the analyst outputs below into agreement, disagreement, "
-            "risks, catalysts, narrative, and data-vs-interpretation fields. "
+            "Synthesize the analyst outputs below into compact JSON. "
+            "Keep lists to at most 2 short items each. "
+            "Narrative: 1-2 short sentences. "
+            "data_vs_interpretation: one short sentence. "
             "Use only provided data.\n\n"
-            + json.dumps(payload, indent=2, default=str)
+            + json.dumps(payload, separators=(",", ":"), default=str)
         )
 
         try:
